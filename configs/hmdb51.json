@@ -1,0 +1,20 @@
+{
+  "dataset": {
+    "name": "HMDB51-mini-action-set",
+    "root_dir": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/HMDB51",
+    "train_list": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/hmdb51_train.txt",
+    "test_list": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/hmdb51_test.txt"
+  },
+  "analysis": {
+    "output_dir": "outputs/hmdb51_analysis",
+    "num_workers": 4,
+    "thresholds": {
+      "short_duration_sec": 1.0,
+      "long_duration_sec": 20.0,
+      "low_resolution_width": 160,
+      "low_resolution_height": 120,
+      "low_fps": 12.0,
+      "high_fps": 60.0
+    }
+  }
+}
