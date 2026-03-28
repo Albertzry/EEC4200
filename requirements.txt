@@ -2,3 +2,5 @@ opencv-python
 pandas
 tqdm
 numpy
+torch
+matplotlib

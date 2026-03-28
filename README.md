@@ -4,6 +4,8 @@ This repository currently contains a beginner-friendly dataset analysis script f
 
 It now also contains a preprocessing script that converts videos into fixed-length frame folders for later 3D CNN / Transformer training.
 
+It also contains a very basic PyTorch training script for a 3D CNN + Transformer classifier.
+
 ## What this script does
 
 The script reads your train/test split files and analyzes each video to help you understand dataset quality before training a 3D CNN or a 3D CNN + Transformer model.
@@ -32,6 +34,7 @@ EEC4200/
 ├── scripts/
 │   └── analyze_hmdb51.py
 │   └── preprocess_hmdb51.py
+│   └── train_basic_3dcnn_transformer.py
 ├── requirements.txt
 └── README.md
 ```
@@ -76,6 +79,12 @@ Run preprocessing with the default config:
 python scripts/preprocess_hmdb51.py
 ```
 
+Run the basic training script:
+
+```bash
+python scripts/train_basic_3dcnn_transformer.py
+```
+
 Run with overridden paths:
 
 ```bash
@@ -117,6 +126,35 @@ The output directory contains:
 - `train_manifest.csv`
 - `test_manifest.csv`
 - `preprocess_summary.json`
+
+## Basic training behavior
+
+The training script:
+
+- reads `train_manifest.csv` and `test_manifest.csv`
+- loads each sample as `32` frames with shape `224x224`
+- builds a very basic `3D CNN + Transformer` classifier
+- trains with `CrossEntropyLoss`, `Adam`, and a simple learning-rate decay
+- evaluates on the test set every epoch
+- updates `training_curves.png` after every epoch
+- saves:
+  - `best_model.pth`
+  - `history.csv`
+  - `training_curves.png`
+
+Default manifest paths:
+
+- `outputs/hmdb51_preprocessed/train_manifest.csv`
+- `outputs/hmdb51_preprocessed/test_manifest.csv`
+
+You can override them:
+
+```bash
+python scripts/train_basic_3dcnn_transformer.py \
+  --train-manifest outputs/hmdb51_preprocessed/train_manifest.csv \
+  --test-manifest outputs/hmdb51_preprocessed/test_manifest.csv \
+  --output-dir outputs/hmdb51_training_basic
+```
 
 ## Output files
 
