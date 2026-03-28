@@ -31,21 +31,20 @@ from tqdm import tqdm
 # ============================================================
 
 NUM_CLASSES = 8
-NUM_FRAMES = 32
+NUM_FRAMES = 16
 IMAGE_SIZE = 224
-BATCH_SIZE = 4
-EPOCHS = 500
-LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 1e-4
-LR_STEP_SIZE = 10
-LR_GAMMA = 0.5
-CNN_CHANNELS = [16, 32, 64]
+BATCH_SIZE = 16
+EPOCHS = 50
+INITIAL_LEARNING_RATE = 5e-4
+FINAL_LEARNING_RATE = 1e-5
+WEIGHT_DECAY = 1e-1
+CNN_CHANNELS = [64, 128, 256]
 TRANSFORMER_DIM = 64
-TRANSFORMER_HEADS = 4
-TRANSFORMER_LAYERS = 1
-TRANSFORMER_FF_DIM = 128
-DROPOUT = 0.1
-NUM_WORKERS = 0
+TRANSFORMER_HEADS = 8
+TRANSFORMER_LAYERS = 3
+TRANSFORMER_FF_DIM = 256
+DROPOUT = 0.5
+NUM_WORKERS = 12
 DEVICE = "cuda" 
 
 TRAIN_MANIFEST_PATH = "outputs/hmdb51_preprocessed/train_manifest.csv"
@@ -459,15 +458,17 @@ def main() -> None:
 
     model = Basic3DCNNTransformer().to(DEVICE)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(
+    # 使用 AdamW: 这是专门为带有 L2 正则化(Weight Decay) 修复过后的 Adam 优化器，能更有效地防止过拟合
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
+        lr=INITIAL_LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY, # 这就是 L2 正则化项系数
     )
-    scheduler = torch.optim.lr_scheduler.StepLR(
+    scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        step_size=LR_STEP_SIZE,
-        gamma=LR_GAMMA,
+        start_factor=1.0,
+        end_factor=FINAL_LEARNING_RATE / INITIAL_LEARNING_RATE,
+        total_iters=EPOCHS,
     )
 
     history: list[dict[str, Any]] = []

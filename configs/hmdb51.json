@@ -1,9 +1,9 @@
 {
   "dataset": {
     "name": "HMDB51-mini-action-set",
-    "root_dir": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/HMDB51",
-    "train_list": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/hmdb51_train.txt",
-    "test_list": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/hmdb51_test.txt"
+    "root_dir": "/opt/data/private/EEC4200/HMDB51",
+    "train_list": "/opt/data/private/EEC4200/hmdb51_train.txt",
+    "test_list": "/opt/data/private/EEC4200/hmdb51_test.txt"
   },
   "analysis": {
     "output_dir": "outputs/hmdb51_analysis",
