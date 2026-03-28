@@ -2,6 +2,8 @@
 
 This repository currently contains a beginner-friendly dataset analysis script for an HMDB51-style video classification task.
 
+It now also contains a preprocessing script that converts videos into fixed-length frame folders for later 3D CNN / Transformer training.
+
 ## What this script does
 
 The script reads your train/test split files and analyzes each video to help you understand dataset quality before training a 3D CNN or a 3D CNN + Transformer model.
@@ -26,8 +28,10 @@ It checks:
 EEC4200/
 ├── configs/
 │   └── hmdb51.json
+│   └── hmdb51_preprocess.json
 ├── scripts/
 │   └── analyze_hmdb51.py
+│   └── preprocess_hmdb51.py
 ├── requirements.txt
 └── README.md
 ```
@@ -66,6 +70,12 @@ Run with the default config:
 python scripts/analyze_hmdb51.py
 ```
 
+Run preprocessing with the default config:
+
+```bash
+python scripts/preprocess_hmdb51.py
+```
+
 Run with overridden paths:
 
 ```bash
@@ -75,6 +85,38 @@ python scripts/analyze_hmdb51.py \
   --test-list /path/to/hmdb51_test.txt \
   --output-dir outputs/hmdb51_analysis_server
 ```
+
+You can also override preprocessing paths:
+
+```bash
+python scripts/preprocess_hmdb51.py \
+  --dataset-root /path/to/HMDB51 \
+  --train-list /path/to/hmdb51_train.txt \
+  --test-list /path/to/hmdb51_test.txt \
+  --output-dir outputs/hmdb51_preprocessed_server
+```
+
+## Preprocessing behavior
+
+The preprocessing script does the following:
+
+- resize all frames to `224x224`
+- resample videos to `16 FPS`
+- generate exactly `32` frames per sample
+- use a mixed strategy for long videos:
+  - keep `16` high-difference frames
+  - fill the rest with `16` uniformly sampled frames
+- pad short videos by repeating frames uniformly
+- create `7` augmented versions for each training video
+- keep the test split unaugmented
+
+The output directory contains:
+
+- `train/<class_name>/<sample_name>/frame_000.jpg ...`
+- `test/<class_name>/<sample_name>/frame_000.jpg ...`
+- `train_manifest.csv`
+- `test_manifest.csv`
+- `preprocess_summary.json`
 
 ## Output files
 

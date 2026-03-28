@@ -1,0 +1,98 @@
+{
+  "dataset": {
+    "name": "HMDB51-mini-action-set",
+    "root_dir": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/HMDB51",
+    "train_list": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/hmdb51_train.txt",
+    "test_list": "/Users/albert/Library/Mobile Documents/com~apple~CloudDocs/EEC4200/hmdb51_test.txt"
+  },
+  "preprocess": {
+    "output_dir": "outputs/hmdb51_preprocessed",
+    "target_width": 224,
+    "target_height": 224,
+    "target_fps": 16.0,
+    "num_frames": 32,
+    "num_augmentations": 7,
+    "augmentation_profile": "medium",
+    "random_seed": 42,
+    "jpeg_quality": 95,
+    "allowed_extensions": [
+      ".avi",
+      ".mp4",
+      ".mov",
+      ".mkv"
+    ],
+    "augmentations": {
+      "horizontal_flip": {
+        "enabled": true,
+        "probability": 0.5
+      },
+      "brightness": {
+        "enabled": true,
+        "probability": 0.4,
+        "min_factor": 0.85,
+        "max_factor": 1.15
+      },
+      "contrast": {
+        "enabled": true,
+        "probability": 0.4,
+        "min_factor": 0.85,
+        "max_factor": 1.15
+      },
+      "saturation": {
+        "enabled": true,
+        "probability": 0.3,
+        "min_factor": 0.85,
+        "max_factor": 1.15
+      },
+      "hue_shift": {
+        "enabled": true,
+        "probability": 0.2,
+        "max_shift": 8
+      },
+      "gaussian_blur": {
+        "enabled": true,
+        "probability": 0.2,
+        "kernel_sizes": [
+          3,
+          5
+        ]
+      },
+      "gaussian_noise": {
+        "enabled": true,
+        "probability": 0.15,
+        "std_min": 3.0,
+        "std_max": 10.0
+      },
+      "rotation": {
+        "enabled": true,
+        "probability": 0.25,
+        "max_degrees": 10.0
+      },
+      "translation": {
+        "enabled": true,
+        "probability": 0.2,
+        "max_ratio_x": 0.08,
+        "max_ratio_y": 0.08
+      },
+      "zoom": {
+        "enabled": true,
+        "probability": 0.25,
+        "min_scale": 0.92,
+        "max_scale": 1.08
+      },
+      "random_crop": {
+        "enabled": true,
+        "probability": 0.3,
+        "min_scale": 0.85,
+        "max_scale": 0.98
+      },
+      "random_erasing": {
+        "enabled": true,
+        "probability": 0.15,
+        "min_area_ratio": 0.02,
+        "max_area_ratio": 0.08,
+        "max_aspect_ratio": 2.0
+      }
+    }
+  }
+}
