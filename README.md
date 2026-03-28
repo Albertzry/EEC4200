@@ -85,6 +85,14 @@ Run the basic training script:
 python scripts/train_basic_3dcnn_transformer.py
 ```
 
+Run test only with an existing saved model:
+
+```bash
+python scripts/train_basic_3dcnn_transformer.py \
+  --mode test \
+  --model-path outputs/hmdb51_training_basic/fold_1/best_model.pth
+```
+
 Run with overridden paths:
 
 ```bash
@@ -134,13 +142,16 @@ The training script:
 - reads `train_manifest.csv` and `test_manifest.csv`
 - loads each sample as `32` frames with shape `224x224`
 - builds a very basic `3D CNN + Transformer` classifier
-- trains with `CrossEntropyLoss`, `Adam`, and a simple learning-rate decay
-- evaluates on the test set every epoch
-- updates `training_curves.png` after every epoch
+- uses 5-fold cross validation on the training manifest
+- plots only train / validation curves during training
+- evaluates the test set only once after all folds finish
+- keeps a separate test-only mode for later repeated testing
 - saves:
-  - `best_model.pth`
-  - `history.csv`
-  - `training_curves.png`
+  - `fold_x/best_model.pth`
+  - `fold_x/history.csv`
+  - `fold_x/training_curves.png`
+  - `cross_validation_summary.csv`
+  - `final_test_result.csv`
 
 Default manifest paths:
 
