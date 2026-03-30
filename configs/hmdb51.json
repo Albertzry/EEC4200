@@ -1,12 +1,12 @@
 {
   "dataset": {
     "name": "HMDB51-mini-action-set",
-    "root_dir": "/opt/data/private/EEC4200/HMDB51",
-    "train_list": "/opt/data/private/EEC4200/hmdb51_train.txt",
-    "test_list": "/opt/data/private/EEC4200/hmdb51_test.txt"
+    "root_dir": "/opt/data/private/EEC4200/ARID",
+    "train_list": "/opt/data/private/EEC4200/arid_train.txt",
+    "test_list": "/opt/data/private/EEC4200/arid_test.txt"
   },
   "analysis": {
-    "output_dir": "outputs/hmdb51_analysis",
+    "output_dir": "outputs/arid_analysis",
     "num_workers": 4,
     "thresholds": {
       "short_duration_sec": 1.0,

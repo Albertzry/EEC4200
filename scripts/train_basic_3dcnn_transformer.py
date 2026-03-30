@@ -19,8 +19,10 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import torch
 import torch.nn as nn
+from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -35,21 +37,20 @@ NUM_CLASSES = 8
 NUM_FRAMES = 32
 IMAGE_SIZE = 224
 BATCH_SIZE = 8
-EPOCHS = 8
+EPOCHS = 50
 LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 1e-3
-LR_STEP_SIZE = 1
-LR_GAMMA = 0.95
+FINAL_LEARNING_RATE = 1e-6
+WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
-CNN_CHANNELS = [8, 16, 32]
+CNN_CHANNELS = [8,16, 32]
 TRANSFORMER_DIM = 32
-TRANSFORMER_HEADS = 2
-TRANSFORMER_LAYERS = 1
+TRANSFORMER_HEADS = 4
+TRANSFORMER_LAYERS = 2
 TRANSFORMER_FF_DIM = 64
-DROPOUT = 0.3
+DROPOUT = 0.6
 
-NUM_WORKERS = 4
+NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TRAIN_MANIFEST_PATH = "outputs/hmdb51_preprocessed/train_manifest.csv"
@@ -189,31 +190,11 @@ class Basic3DCNNTransformer(nn.Module):
         if cnn_channels is None:
             cnn_channels = CNN_CHANNELS
 
-        # 第一部分：3D CNN
-        # First part: 3D CNN
-        #
-        # 输入最开始是 [B, 3, T, H, W]
-        # The input starts as [B, 3, T, H, W]
-        #
-        # 每个 Conv3d 都会同时看：
-        # - 空间信息（图像内容）
-        # - 时间信息（相邻帧变化）
-        #
-        # Each Conv3d looks at both:
-        # - spatial information (image content)
-        # - temporal information (frame-to-frame change)
-        #
-        # 这里的池化只缩小 H 和 W，不缩小 T。
-        # The pooling only shrinks H and W, not T.
-        #
-        # 这样做是为了保留 32 帧的完整时间顺序，
-        # 让后面的 Transformer 还能看到完整的时间序列。
-        # This keeps the full 32-frame order,
-        # so the Transformer can still see the whole time sequence later.
+        # 3D CNN 
         self.features = nn.Sequential(
-            nn.Conv3d(3, cnn_channels[0], kernel_size=3, padding=1),
+            nn.Conv3d(3, cnn_channels[0], kernel_size=3, padding=1),  # Input [B, 3, T, H, W]
             nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),
+            nn.MaxPool3d(kernel_size=(1, 2, 2)),                     # keep time
             nn.Conv3d(cnn_channels[0], cnn_channels[1], kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 2, 2)),
@@ -222,39 +203,10 @@ class Basic3DCNNTransformer(nn.Module):
             nn.MaxPool3d(kernel_size=(1, 2, 2)),
         )
 
-        # 第二部分：把 3D CNN 的输出变成 Transformer 能读的序列
-        # Second part: convert the 3D CNN output into a sequence for the Transformer
-        #
-        # 例如，经过 3D CNN 后，张量大致会像：
-        # [B, 32, T, H', W']
-        #
-        # 然后我们对 H' 和 W' 做平均池化，只留下每个时间步的特征：
-        # [B, 32, T]
-        #
-        # 再把它转成 [B, T, 32]，
-        # 也就是“每一帧对应一个长度为 32 的特征向量”。
-        #
-        # After the 3D CNN, the tensor is roughly:
-        # [B, 32, T, H', W']
-        #
-        # Then we average over H' and W' and keep only one feature vector per time step:
-        # [B, 32, T]
-        #
-        # Then we permute it into [B, T, 32],
-        # which means "one 32-dimensional feature vector for each frame".
-        self.feature_projection = nn.Linear(cnn_channels[-1], transformer_dim)
+        self.feature_projection = nn.Linear(cnn_channels[-1], transformer_dim)  # Map to transformer input dim
         self.position_encoding = BasicPositionalEncoding(num_frames, transformer_dim)
 
-        # 第三部分：Transformer Encoder
-        # Third part: Transformer Encoder
-        #
-        # 这里的 Transformer 负责看“整段视频里的帧之间关系”。
-        # The Transformer models the relationship between frames across the whole video.
-        #
-        # 它不会像 3D CNN 那样只看局部小窗口，
-        # 而是更擅长建模较长范围的时间依赖。
-        # It does not only look at small local windows like 3D CNN,
-        # but is better at modeling longer temporal dependencies.
+        # Transformer encoder 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim,
             nhead=transformer_heads,
@@ -267,13 +219,7 @@ class Basic3DCNNTransformer(nn.Module):
             num_layers=transformer_layers,
         )
 
-        # 第四部分：分类头
-        # Fourth part: classification head
-        #
-        # Transformer 输出后，我们对所有时间步做平均，
-        # 得到整段视频的一个全局表示，再映射到 8 个类别。
-        # After the Transformer, we average all time steps,
-        # get one global video representation, and map it to 8 classes.
+        # Classification output layers
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(transformer_dim, num_classes)
 
@@ -467,10 +413,16 @@ def train_one_fold(
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
     )
-    scheduler = torch.optim.lr_scheduler.StepLR(
+    # 计算线性衰减的最终系数
+    # Calculate the end_factor for linear decay
+    # start_factor = 1.0 (starts at LEARNING_RATE)
+    # end_factor = FINAL_LEARNING_RATE / LEARNING_RATE
+    end_factor = FINAL_LEARNING_RATE / LEARNING_RATE
+    scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        step_size=LR_STEP_SIZE,
-        gamma=LR_GAMMA,
+        start_factor=1.0,
+        end_factor=end_factor,
+        total_iters=EPOCHS,
     )
 
     history: list[dict[str, Any]] = []
@@ -536,22 +488,96 @@ def train_one_fold(
     }
 
 
-def run_test_only(model_path: str, test_manifest: str) -> tuple[float, float]:
+def run_test_only(
+    model_path: str, test_manifest: str, output_dir: Path | None = None
+) -> tuple[float, float]:
     test_df = pd.read_csv(test_manifest)
+    class_mapping = test_df[["label", "class_name"]].drop_duplicates().sort_values("label")
+    class_names = class_mapping["class_name"].tolist()
+
     test_loader = build_dataloader(test_df, shuffle=False)
 
     model = Basic3DCNNTransformer().to(DEVICE)
     state_dict = torch.load(model_path, map_location=DEVICE)
     model.load_state_dict(state_dict)
+    model.eval()
     criterion = nn.CrossEntropyLoss()
 
-    test_loss, test_accuracy = evaluate(
-        model=model,
-        dataloader=test_loader,
-        criterion=criterion,
-        device=DEVICE,
+    total_loss = 0.0
+    all_preds = []
+    all_labels = []
+
+    print(f"Running evaluation on {len(test_df)} samples...")
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Testing"):
+            videos = batch["video"].to(DEVICE)
+            labels = batch["label"].to(DEVICE)
+            logits = model(videos)
+            loss = criterion(logits, labels)
+
+            total_loss += loss.item() * labels.size(0)
+            all_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    avg_loss = total_loss / len(test_df)
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    accuracy = (all_preds == all_labels).mean()
+
+    # Generate and print classification report
+    report = classification_report(
+        all_labels, all_preds, target_names=class_names, digits=4
     )
-    return test_loss, test_accuracy
+    print("\n===== Classification Report =====")
+    print(report)
+
+    # Generate confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
+
+    if output_dir:
+        # Save metrics to text file
+        with open(output_dir / "test_classification_report.txt", "w") as f:
+            f.write(report)
+
+        # Plot and save confusion matrix
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=class_names,
+            yticklabels=class_names,
+        )
+        plt.xlabel("Predicted Label")
+        plt.ylabel("True Label")
+        plt.title("Confusion Matrix")
+        plt.tight_layout()
+        cm_path = output_dir / "test_confusion_matrix.png"
+        plt.savefig(cm_path, dpi=200)
+        plt.close()
+        print(f"Confusion matrix saved to {cm_path}")
+
+        # Save results to Markdown
+        md_content = f"""# HMDB51 Test Results Summary
+
+## Performance Summary
+- **Test Loss:** {avg_loss:.6f}
+- **Test Accuracy:** {accuracy:.4f} ({accuracy * 100:.2f}%)
+
+## Classification Report
+```text
+{report}
+```
+
+## Confusion Matrix
+![Confusion Matrix]({cm_path.name})
+"""
+        with open(output_dir / "test_results_summary.md", "w") as f:
+            f.write(md_content)
+        print(f"Markdown summary saved to {output_dir / 'test_results_summary.md'}")
+
+    return avg_loss, accuracy
 
 
 def run_training(args: argparse.Namespace) -> None:
@@ -597,13 +623,18 @@ def run_training(args: argparse.Namespace) -> None:
 
     # 训练全部完成后，test 只跑一次
     # After all folds finish, run test only once
-    test_loss, test_accuracy = run_test_only(best_model_path, args.test_manifest)
-    print("\n===== Final Test Result =====")
-    print(f"test_loss={test_loss:.4f}, test_accuracy={test_accuracy:.4f}")
+    test_loss, test_accuracy = run_test_only(
+        best_model_path, args.test_manifest, output_dir=output_dir
+    )
+    print("\n===== Final Test Result Summary =====")
+    print(f"Best Fold: {best_row['fold']}")
+    print(f"Test Loss: {test_loss:.4f}")
+    print(f"Test Accuracy: {test_accuracy:.4f}")
 
     pd.DataFrame(
         [
             {
+                "best_fold": best_row["fold"],
                 "best_model_path": best_model_path,
                 "test_loss": round(test_loss, 6),
                 "test_accuracy": round(test_accuracy, 6),
@@ -621,8 +652,10 @@ def run_test_mode(args: argparse.Namespace) -> None:
     print(f"Model path: {args.model_path}")
     print(f"Test manifest: {args.test_manifest}")
 
-    test_loss, test_accuracy = run_test_only(args.model_path, args.test_manifest)
-    print(f"test_loss={test_loss:.4f}, test_accuracy={test_accuracy:.4f}")
+    test_loss, test_accuracy = run_test_only(
+        args.model_path, args.test_manifest, output_dir=Path(args.output_dir)
+    )
+    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
 
 
 def main() -> None:
