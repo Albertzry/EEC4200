@@ -11,10 +11,18 @@
     "target_height": 224,
     "target_fps": 16.0,
     "num_frames": 32,
-    "num_augmentations": 7,
+    "num_augmentations": 3,
     "augmentation_profile": "medium",
     "random_seed": 42,
     "jpeg_quality": 95,
+    "low_light_enhancement": {
+      "enabled": true,
+      "gamma": 3.2,
+      "clahe_clip_limit": 6.0,
+      "clahe_grid_size": 8,
+      "brightness_gain": 1.5,
+      "contrast_gain": 1.25
+    },
     "allowed_extensions": [
       ".avi",
       ".mp4",
@@ -28,26 +36,26 @@
       },
       "brightness": {
         "enabled": true,
-        "probability": 0.2,
-        "min_factor": 0.85,
-        "max_factor": 1.15
+        "probability": 0.5,
+        "min_factor": 0.9,
+        "max_factor": 1.2
       },
       "contrast": {
         "enabled": true,
-        "probability": 0.2,
-        "min_factor": 0.85,
-        "max_factor": 1.15
+        "probability": 0.5,
+        "min_factor": 0.9,
+        "max_factor": 1.2
       },
       "saturation": {
         "enabled": true,
-        "probability": 0.1,
-        "min_factor": 0.85,
-        "max_factor": 1.15
+        "probability": 0.2,
+        "min_factor": 0.9,
+        "max_factor": 1.1
       },
       "hue_shift": {
         "enabled": true,
         "probability": 0.1,
-        "max_shift": 8
+        "max_shift": 4
       },
       "gaussian_blur": {
         "enabled": true,
@@ -59,39 +67,39 @@
       },
       "gaussian_noise": {
         "enabled": true,
-        "probability": 0.15,
-        "std_min": 3.0,
-        "std_max": 10.0
+        "probability": 0.05,
+        "std_min": 2.0,
+        "std_max": 5.0
       },
       "rotation": {
         "enabled": true,
-        "probability": 0.15,
-        "max_degrees": 10.0
+        "probability": 0.1,
+        "max_degrees": 5.0
       },
       "translation": {
         "enabled": true,
-        "probability": 0.1,
-        "max_ratio_x": 0.08,
-        "max_ratio_y": 0.08
+        "probability": 0.15,
+        "max_ratio_x": 0.05,
+        "max_ratio_y": 0.05
       },
       "zoom": {
         "enabled": true,
         "probability": 0.15,
-        "min_scale": 0.92,
-        "max_scale": 1.08
+        "min_scale": 0.95,
+        "max_scale": 1.05
       },
       "random_crop": {
         "enabled": true,
         "probability": 0.2,
-        "min_scale": 0.85,
+        "min_scale": 0.9,
         "max_scale": 0.98
       },
       "random_erasing": {
         "enabled": true,
-        "probability": 0.15,
-        "min_area_ratio": 0.02,
-        "max_area_ratio": 0.08,
-        "max_aspect_ratio": 2.0
+        "probability": 0.05,
+        "min_area_ratio": 0.01,
+        "max_area_ratio": 0.04,
+        "max_aspect_ratio": 1.5
       }
     }
   }

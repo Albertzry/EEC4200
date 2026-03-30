@@ -22,6 +22,7 @@ import pandas as pd
 import seaborn as sns
 import torch
 import torch.nn as nn
+import torchvision.transforms as T
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -36,19 +37,19 @@ from tqdm import tqdm
 NUM_CLASSES = 8
 NUM_FRAMES = 32
 IMAGE_SIZE = 224
-BATCH_SIZE = 16
+BATCH_SIZE = 12
 EPOCHS = 50
-LEARNING_RATE = 1e-3
-FINAL_LEARNING_RATE = 1e-5
+LEARNING_RATE = 1e-4
+FINAL_LEARNING_RATE = 1e-6
 WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
-CNN_CHANNELS = [32, 64, 128]
-TRANSFORMER_DIM = 128
+CNN_CHANNELS = [64, 128, 256, 512]
+TRANSFORMER_DIM = 256
 TRANSFORMER_HEADS = 8
 TRANSFORMER_LAYERS = 3
-TRANSFORMER_FF_DIM = 256
-DROPOUT = 0.6
+TRANSFORMER_FF_DIM = 512
+DROPOUT = 0.5
 
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -107,10 +108,15 @@ class HMDB51FrameDataset(Dataset):
         dataframe: pd.DataFrame,
         num_frames: int = NUM_FRAMES,
         image_size: int = IMAGE_SIZE,
+        is_training: bool = False,
     ) -> None:
         self.data = dataframe.reset_index(drop=True).copy()
         self.num_frames = num_frames
         self.image_size = image_size
+        self.is_training = is_training
+        
+        # ColorJitter for dark video augmentation
+        self.color_jitter = T.ColorJitter(brightness=0.3, contrast=0.3) if is_training else None
 
     def __len__(self) -> int:
         return len(self.data)
@@ -125,11 +131,16 @@ class HMDB51FrameDataset(Dataset):
             image = cv2.resize(image, (self.image_size, self.image_size))
 
         image = image.astype(np.float32) / 255.0
-        image = (image - np.array(NORMALIZE_MEAN, dtype=np.float32)) / np.array(
-            NORMALIZE_STD, dtype=np.float32
-        )
         image = np.transpose(image, (2, 0, 1))
-        return torch.from_numpy(image)
+        tensor = torch.from_numpy(image)
+        
+        if self.color_jitter:
+            tensor = self.color_jitter(tensor)
+            
+        mean_tensor = torch.tensor(NORMALIZE_MEAN, dtype=torch.float32).view(-1, 1, 1)
+        std_tensor = torch.tensor(NORMALIZE_STD, dtype=torch.float32).view(-1, 1, 1)
+        tensor = (tensor - mean_tensor) / std_tensor
+        return tensor
 
     def _load_video_frames(self, frame_dir: str) -> torch.Tensor:
         # 最后输出 [C, T, H, W]。
@@ -156,7 +167,7 @@ class BasicPositionalEncoding(nn.Module):
     # The Transformer does not know frame order by itself, so we add positional encoding.
     def __init__(self, max_length: int, embed_dim: int) -> None:
         super().__init__()
-        self.position_embedding = nn.Parameter(torch.zeros(1, max_length, embed_dim))
+        self.position_embedding = nn.Parameter(torch.randn(1, max_length, embed_dim) * 0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.position_embedding[:, : x.size(1), :]
@@ -193,12 +204,19 @@ class Basic3DCNNTransformer(nn.Module):
         # 3D CNN 
         self.features = nn.Sequential(
             nn.Conv3d(3, cnn_channels[0], kernel_size=3, padding=1),  # Input [B, 3, T, H, W]
+            nn.BatchNorm3d(cnn_channels[0]),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 2, 2)),                     # keep time
             nn.Conv3d(cnn_channels[0], cnn_channels[1], kernel_size=3, padding=1),
+            nn.BatchNorm3d(cnn_channels[1]),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 2, 2)),
             nn.Conv3d(cnn_channels[1], cnn_channels[2], kernel_size=3, padding=1),
+            nn.BatchNorm3d(cnn_channels[2]),
+            nn.ReLU(inplace=True),
+            nn.MaxPool3d(kernel_size=(1, 2, 2)),
+            nn.Conv3d(cnn_channels[2], cnn_channels[3], kernel_size=3, padding=1),
+            nn.BatchNorm3d(cnn_channels[3]),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 2, 2)),
         )
@@ -221,6 +239,7 @@ class Basic3DCNNTransformer(nn.Module):
 
         # Classification output layers
         self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(transformer_dim)
         self.classifier = nn.Linear(transformer_dim, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -252,6 +271,7 @@ class Basic3DCNNTransformer(nn.Module):
         # Average over time to get one representation for the whole video
         x = x.mean(dim=1)
         x = self.dropout(x)
+        x = self.layer_norm(x)
 
         # 输出 8 类分数
         # Output logits for 8 classes
@@ -259,7 +279,7 @@ class Basic3DCNNTransformer(nn.Module):
 
 
 def build_dataloader(dataframe: pd.DataFrame, shuffle: bool) -> DataLoader:
-    dataset = HMDB51FrameDataset(dataframe=dataframe)
+    dataset = HMDB51FrameDataset(dataframe=dataframe, is_training=shuffle)
     return DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
