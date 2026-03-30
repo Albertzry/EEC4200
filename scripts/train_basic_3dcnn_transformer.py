@@ -41,7 +41,6 @@ IMAGE_SIZE = 224
 BATCH_SIZE = 12
 EPOCHS = 50
 LEARNING_RATE = 1e-4
-UNFREEZE_LEARNING_RATE = 3e-5
 FINAL_LEARNING_RATE = 1e-6
 WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
@@ -54,14 +53,13 @@ TRANSFORMER_FF_DIM = 512
 DROPOUT = 0.4
 
 # ============================================================
-# Freeze / unfreeze settings for the R3D backbone
-# 先冻结前面的 R3D 层，过几轮再解冻。
-# Freeze early R3D layers first, then unfreeze them after a few epochs.
+# Freeze settings for the R3D backbone
+# 永久冻结前面的 R3D 层，让训练更稳定。
+# Permanently freeze early R3D layers to keep training more stable.
 # ============================================================
 FREEZE_R3D_STEM = True
 FREEZE_R3D_LAYER1 = True
 FREEZE_R3D_LAYER2 = False
-UNFREEZE_AT_EPOCH = 8
 
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -274,8 +272,8 @@ class BasicR3DTransformer(nn.Module):
         self.layer_norm = nn.LayerNorm(transformer_dim)
         self.classifier = nn.Linear(transformer_dim, num_classes)
 
-        # 训练开始时，先冻结一部分早期 R3D 层。
-        # At the start of training, freeze some early R3D layers first.
+        # 训练开始时，永久冻结一部分早期 R3D 层。
+        # At the start of training, permanently freeze some early R3D layers.
         self.freeze_early_r3d_layers()
 
     def freeze_early_r3d_layers(self) -> None:
@@ -290,13 +288,6 @@ class BasicR3DTransformer(nn.Module):
         if FREEZE_R3D_LAYER2:
             for param in self.layer2.parameters():
                 param.requires_grad = False
-
-    def unfreeze_all_r3d_layers(self) -> None:
-        # 到了指定 epoch 后，把整个 R3D backbone 解冻。
-        # After the chosen epoch, unfreeze the whole R3D backbone.
-        for module in [self.stem, self.layer1, self.layer2, self.layer3, self.layer4]:
-            for param in module.parameters():
-                param.requires_grad = True
 
     def count_trainable_parameters(self) -> int:
         # 方便在日志里查看当前有多少参数在训练。
@@ -353,49 +344,6 @@ def build_model() -> nn.Module:
     # 单独写一个 build_model，后面训练和测试都复用。
     # Keep model creation in one place so both training and testing reuse it.
     return BasicR3DTransformer().to(DEVICE)
-
-
-def set_optimizer_learning_rate(optimizer: torch.optim.Optimizer, lr: float) -> None:
-    # 手动设置 optimizer 的学习率，避免引入更复杂的 scheduler。
-    # Manually set optimizer learning rate to keep things simple.
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-
-
-def get_epoch_learning_rate(epoch: int) -> float:
-    # 两阶段学习率：
-    # 1. 冻结阶段：使用较大的学习率训练后面的层
-    # 2. 解冻之后：切到更小的学习率，再慢慢下降到 FINAL_LEARNING_RATE
-    #
-    # Two-stage learning rate:
-    # 1. Frozen stage: use a larger LR for the later layers
-    # 2. After unfreezing: switch to a smaller LR, then decay toward FINAL_LEARNING_RATE
-    if epoch < UNFREEZE_AT_EPOCH:
-        return LEARNING_RATE
-
-    remaining_epochs = max(EPOCHS - UNFREEZE_AT_EPOCH, 1)
-    progress = min(max(epoch - UNFREEZE_AT_EPOCH, 0), remaining_epochs) / remaining_epochs
-    return UNFREEZE_LEARNING_RATE + (FINAL_LEARNING_RATE - UNFREEZE_LEARNING_RATE) * progress
-
-
-def maybe_unfreeze_backbone(
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-) -> None:
-    # 训练到指定 epoch 时，把前面冻结的 R3D 层解冻。
-    # When training reaches the chosen epoch, unfreeze the frozen R3D layers.
-    if epoch != UNFREEZE_AT_EPOCH:
-        return
-
-    if isinstance(model, BasicR3DTransformer):
-        model.unfreeze_all_r3d_layers()
-        set_optimizer_learning_rate(optimizer, UNFREEZE_LEARNING_RATE)
-        print(
-            f"Unfreezing R3D backbone at epoch {epoch}. "
-            f"Trainable parameters: {model.count_trainable_parameters():,}. "
-            f"New learning rate: {UNFREEZE_LEARNING_RATE:.6f}"
-        )
 
 
 def build_dataloader(dataframe: pd.DataFrame, shuffle: bool) -> DataLoader:
@@ -553,6 +501,13 @@ def train_one_fold(
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
     )
+    end_factor = FINAL_LEARNING_RATE / LEARNING_RATE
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1.0,
+        end_factor=end_factor,
+        total_iters=EPOCHS,
+    )
 
     history: list[dict[str, Any]] = []
     best_val_accuracy = -1.0
@@ -562,12 +517,12 @@ def train_one_fold(
     print(f"Train samples: {len(train_part)}")
     print(f"Validation samples: {len(val_part)}")
     if isinstance(model, BasicR3DTransformer):
-        print(f"Initial trainable parameters: {model.count_trainable_parameters():,}")
+        print(
+            f"Trainable parameters after permanent freezing: "
+            f"{model.count_trainable_parameters():,}"
+        )
 
     for epoch in range(1, EPOCHS + 1):
-        maybe_unfreeze_backbone(model, optimizer, epoch)
-        current_lr = get_epoch_learning_rate(epoch)
-        set_optimizer_learning_rate(optimizer, current_lr)
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"\nFold {fold_index + 1} Epoch {epoch}/{EPOCHS} | lr={current_lr:.6f}")
 
@@ -610,6 +565,8 @@ def train_one_fold(
             best_val_accuracy = val_accuracy
             best_epoch = epoch
             torch.save(model.state_dict(), fold_dir / "best_model.pth")
+
+        scheduler.step()
 
     return {
         "fold": fold_index + 1,
