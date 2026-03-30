@@ -3,4 +3,7 @@ pandas
 tqdm
 numpy
 torch
+torchvision
 matplotlib
+seaborn
+scikit-learn

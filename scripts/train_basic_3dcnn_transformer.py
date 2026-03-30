@@ -23,6 +23,7 @@ import seaborn as sns
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
+from torchvision.models.video import r3d_18
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -44,12 +45,12 @@ FINAL_LEARNING_RATE = 1e-6
 WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
-CNN_CHANNELS = [64, 128, 256, 512]
+R3D_FEATURE_DIM = 512
 TRANSFORMER_DIM = 256
 TRANSFORMER_HEADS = 8
-TRANSFORMER_LAYERS = 3
+TRANSFORMER_LAYERS = 2
 TRANSFORMER_FF_DIM = 512
-DROPOUT = 0.5
+DROPOUT = 0.4
 
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -173,22 +174,22 @@ class BasicPositionalEncoding(nn.Module):
         return x + self.position_embedding[:, : x.size(1), :]
 
 
-class Basic3DCNNTransformer(nn.Module):
+class BasicR3DTransformer(nn.Module):
     # 模型主思路：
     # 1. 输入是一个视频张量 [B, 3, T, H, W]
-    # 2. 3D CNN 先提取局部时空特征
-    # 3. Transformer 再建模整段视频的时间关系
+    # 2. 先用最基础的 R3D-18 backbone 提取更成熟的时空特征
+    # 3. 再把这些时间特征送进 Transformer
     # 4. 最后用全连接层做分类
     #
     # Main idea:
     # 1. Input is a video tensor [B, 3, T, H, W]
-    # 2. 3D CNN extracts local spatio-temporal features first
-    # 3. Transformer models the full temporal relationship
-    # 4. A linear layer does the final classification
+    # 2. Use a basic R3D-18 backbone to extract stronger spatio-temporal features
+    # 3. Feed the time sequence into a Transformer
+    # 4. Use a linear layer for final classification
     def __init__(
         self,
         num_classes: int = NUM_CLASSES,
-        cnn_channels: list[int] | None = None,
+        r3d_feature_dim: int = R3D_FEATURE_DIM,
         transformer_dim: int = TRANSFORMER_DIM,
         transformer_heads: int = TRANSFORMER_HEADS,
         transformer_layers: int = TRANSFORMER_LAYERS,
@@ -198,33 +199,52 @@ class Basic3DCNNTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        if cnn_channels is None:
-            cnn_channels = CNN_CHANNELS
+        # 第一部分：R3D backbone
+        # First part: R3D backbone
+        #
+        # 这里不直接用 r3d_18 的最终分类层，而是只拿它前面的特征提取部分。
+        # We do not use the final classification layer of r3d_18 here.
+        # We only keep the feature extraction part.
+        #
+        # 这样做的原因是：
+        # 1. R3D 是更成熟的 3D CNN backbone
+        # 2. 它比手写的几层 Conv3d 更容易提取有效时空特征
+        # 3. 我们后面还要接 Transformer，所以这里只需要特征，不要最终分类结果
+        #
+        # Why:
+        # 1. R3D is a more mature 3D CNN backbone
+        # 2. It usually extracts better video features than a few hand-written Conv3d layers
+        # 3. We still want to use a Transformer later, so we only need backbone features here
+        backbone = r3d_18(weights=None)
+        self.stem = backbone.stem
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
 
-        # 3D CNN 
-        self.features = nn.Sequential(
-            nn.Conv3d(3, cnn_channels[0], kernel_size=3, padding=1),  # Input [B, 3, T, H, W]
-            nn.BatchNorm3d(cnn_channels[0]),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),                     # keep time
-            nn.Conv3d(cnn_channels[0], cnn_channels[1], kernel_size=3, padding=1),
-            nn.BatchNorm3d(cnn_channels[1]),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),
-            nn.Conv3d(cnn_channels[1], cnn_channels[2], kernel_size=3, padding=1),
-            nn.BatchNorm3d(cnn_channels[2]),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),
-            nn.Conv3d(cnn_channels[2], cnn_channels[3], kernel_size=3, padding=1),
-            nn.BatchNorm3d(cnn_channels[3]),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2)),
-        )
-
-        self.feature_projection = nn.Linear(cnn_channels[-1], transformer_dim)  # Map to transformer input dim
+        # 第二部分：把 R3D 的输出变成 Transformer 能读的序列
+        # Second part: turn the R3D output into a sequence for the Transformer
+        #
+        # 经过 R3D 后，张量仍然是 5 维：[B, C, T', H', W']
+        # After R3D, the tensor is still 5D: [B, C, T', H', W']
+        #
+        # 我们先对空间维 H' 和 W' 求平均，只保留时间维 T'
+        # Then we average over H' and W' to keep only the temporal sequence T'
+        #
+        # 这样每个时间步都会得到一个长度为 C 的特征向量
+        # This gives one C-dimensional feature vector for each time step
+        self.feature_projection = nn.Linear(r3d_feature_dim, transformer_dim)
         self.position_encoding = BasicPositionalEncoding(num_frames, transformer_dim)
 
-        # Transformer encoder 
+        # 第三部分：Transformer encoder
+        # Third part: Transformer encoder
+        #
+        # 这里保留你原来的思路：R3D 先提局部到中层时空特征，
+        # Transformer 再看更长范围的时间关系。
+        #
+        # We keep your original idea here:
+        # R3D extracts local / mid-level spatio-temporal features first,
+        # then the Transformer models longer temporal relationships.
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim,
             nhead=transformer_heads,
@@ -237,7 +257,8 @@ class Basic3DCNNTransformer(nn.Module):
             num_layers=transformer_layers,
         )
 
-        # Classification output layers
+        # 最后是分类头
+        # Final classification head
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(transformer_dim)
         self.classifier = nn.Linear(transformer_dim, num_classes)
@@ -245,18 +266,28 @@ class Basic3DCNNTransformer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # 输入: [B, 3, 32, 224, 224]
         # Input: [B, 3, 32, 224, 224]
-        x = self.features(x)
+
+        # R3D 的特征提取部分
+        # R3D feature extraction part
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
 
         # 做空间平均池化，保留时间维
         # Spatial average pooling while keeping the time dimension
+        #
+        # [B, C, T', H', W'] -> [B, C, T']
         x = x.mean(dim=4).mean(dim=3)
 
-        # [B, C, T] -> [B, T, C]
-        # This is the shape expected by the Transformer
+        # [B, C, T'] -> [B, T', C]
+        # Transformer 更喜欢 [batch, time, feature] 这样的格式
+        # Transformer prefers [batch, time, feature]
         x = x.permute(0, 2, 1)
 
-        # 把 CNN 特征映射到 Transformer 的特征维度
-        # Project CNN features into the Transformer feature dimension
+        # 把 R3D 特征映射到 Transformer 的特征维度
+        # Project R3D features into the Transformer feature dimension
         x = self.feature_projection(x)
 
         # 加入位置信息，让模型知道帧顺序
@@ -276,6 +307,12 @@ class Basic3DCNNTransformer(nn.Module):
         # 输出 8 类分数
         # Output logits for 8 classes
         return self.classifier(x)
+
+
+def build_model() -> nn.Module:
+    # 单独写一个 build_model，后面训练和测试都复用。
+    # Keep model creation in one place so both training and testing reuse it.
+    return BasicR3DTransformer().to(DEVICE)
 
 
 def build_dataloader(dataframe: pd.DataFrame, shuffle: bool) -> DataLoader:
@@ -426,7 +463,7 @@ def train_one_fold(
     train_loader = build_dataloader(train_part, shuffle=True)
     val_loader = build_dataloader(val_part, shuffle=False)
 
-    model = Basic3DCNNTransformer().to(DEVICE)
+    model = build_model()
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -517,7 +554,7 @@ def run_test_only(
 
     test_loader = build_dataloader(test_df, shuffle=False)
 
-    model = Basic3DCNNTransformer().to(DEVICE)
+    model = build_model()
     state_dict = torch.load(model_path, map_location=DEVICE)
     model.load_state_dict(state_dict)
     model.eval()
@@ -607,7 +644,7 @@ def run_training(args: argparse.Namespace) -> None:
     train_df = pd.read_csv(args.train_manifest)
     test_df = pd.read_csv(args.test_manifest)
 
-    print("===== Basic 3D CNN + Transformer 5-Fold Training =====")
+    print("===== Basic R3D + Transformer 5-Fold Training =====")
     print(f"Device: {DEVICE}")
     print(f"Train manifest: {args.train_manifest}")
     print(f"Test manifest: {args.test_manifest}")
