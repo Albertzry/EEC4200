@@ -36,26 +36,26 @@ from tqdm import tqdm
 NUM_CLASSES = 8
 NUM_FRAMES = 32
 IMAGE_SIZE = 224
-BATCH_SIZE = 8
+BATCH_SIZE = 16
 EPOCHS = 50
-LEARNING_RATE = 1e-4
-FINAL_LEARNING_RATE = 1e-6
+LEARNING_RATE = 1e-3
+FINAL_LEARNING_RATE = 1e-5
 WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
-CNN_CHANNELS = [8,16, 32]
-TRANSFORMER_DIM = 32
-TRANSFORMER_HEADS = 4
-TRANSFORMER_LAYERS = 2
-TRANSFORMER_FF_DIM = 64
+CNN_CHANNELS = [32, 64, 128]
+TRANSFORMER_DIM = 128
+TRANSFORMER_HEADS = 8
+TRANSFORMER_LAYERS = 3
+TRANSFORMER_FF_DIM = 256
 DROPOUT = 0.6
 
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TRAIN_MANIFEST_PATH = "outputs/hmdb51_preprocessed/train_manifest.csv"
-TEST_MANIFEST_PATH = "outputs/hmdb51_preprocessed/test_manifest.csv"
-OUTPUT_DIR = "outputs/hmdb51_training_basic"
+TRAIN_MANIFEST_PATH = "outputs/arid_preprocessed/train_manifest.csv"
+TEST_MANIFEST_PATH = "outputs/arid_preprocessed/test_manifest.csv"
+OUTPUT_DIR = "outputs/arid_training_basic"
 
 NORMALIZE_MEAN = [0.5, 0.5, 0.5]
 NORMALIZE_STD = [0.5, 0.5, 0.5]

@@ -16,6 +16,7 @@ import argparse
 import json
 import math
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -717,22 +718,37 @@ def main() -> None:
     test_records: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
 
-    for sample in tqdm(all_samples, desc="Preprocessing videos"):
-        records, item_summary = process_single_video(sample, config, rng)
-        if item_summary["success"]:
-            if sample["split"] == "train":
-                train_records.extend(records)
+    num_workers = 12
+    print(f"Starting multi-threaded preprocessing with {num_workers} workers...")
+
+    # 为了保证多线程下的随机性，我们为每个任务传入一个独立的种子偏移
+    # To ensure randomness in multi-threading, we pass a unique seed offset for each task
+    def task_wrapper(sample):
+        # 使用原始随机种子加上 sample_id 确保每个视频的增强是确定且唯一的
+        # Use base seed + sample_id to ensure augmentations are deterministic and unique
+        task_rng = random.Random(config.random_seed + sample["sample_id"])
+        records, item_summary = process_single_video(sample, config, task_rng)
+        return records, item_summary, sample
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(task_wrapper, sample): sample for sample in all_samples}
+
+        for future in tqdm(as_completed(futures), total=len(all_samples), desc="Preprocessing videos"):
+            records, item_summary, sample = future.result()
+            if item_summary["success"]:
+                if sample["split"] == "train":
+                    train_records.extend(records)
+                else:
+                    test_records.extend(records)
             else:
-                test_records.extend(records)
-        else:
-            failures.append(
-                {
-                    "split": sample["split"],
-                    "class_name": sample["class_name"],
-                    "relative_path": sample["relative_path"],
-                    "error": item_summary["error"],
-                }
-            )
+                failures.append(
+                    {
+                        "split": sample["split"],
+                        "class_name": sample["class_name"],
+                        "relative_path": sample["relative_path"],
+                        "error": item_summary["error"],
+                    }
+                )
 
     summary = build_summary(
         all_samples=all_samples,
