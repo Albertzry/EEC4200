@@ -38,19 +38,19 @@ from tqdm import tqdm
 NUM_CLASSES = 8
 NUM_FRAMES = 32
 IMAGE_SIZE = 224
-BATCH_SIZE = 12
+BATCH_SIZE = 8
 EPOCHS = 50
-LEARNING_RATE = 1e-4
-FINAL_LEARNING_RATE = 1e-6
+LEARNING_RATE = 5e-6
+FINAL_LEARNING_RATE = 1e-7
 WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
 R3D_FEATURE_DIM = 512
-TRANSFORMER_DIM = 256
-TRANSFORMER_HEADS = 8
-TRANSFORMER_LAYERS = 2
-TRANSFORMER_FF_DIM = 512
-DROPOUT = 0.4
+TRANSFORMER_DIM = 128
+TRANSFORMER_HEADS = 4
+TRANSFORMER_LAYERS = 1
+TRANSFORMER_FF_DIM = 256
+DROPOUT = 0.5
 
 # ============================================================
 # Freeze settings for the R3D backbone
@@ -59,7 +59,7 @@ DROPOUT = 0.4
 # ============================================================
 FREEZE_R3D_STEM = True
 FREEZE_R3D_LAYER1 = True
-FREEZE_R3D_LAYER2 = False
+FREEZE_R3D_LAYER2 = True
 
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
