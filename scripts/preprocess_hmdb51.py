@@ -5,8 +5,8 @@ Preprocess HMDB51-style videos into fixed-length frame folders.
 Main features:
 - resize every frame to a fixed size
 - resample videos to a target FPS
-- generate exactly 32 frames for every sample
-- create 7 augmented versions for each training video
+- generate a fixed number of frames for every sample
+- create augmented versions for each training video
 - export train/test manifest files for later dataloader use
 """
 

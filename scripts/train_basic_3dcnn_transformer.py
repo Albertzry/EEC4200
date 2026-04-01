@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Basic 3D CNN + Transformer training script for HMDB51-style frame folders.
+Basic R3D + Transformer training script for fixed-length frame folders.
 
-This version keeps the training pipeline simple:
+This version keeps the training pipeline readable for beginners:
 - 5-fold cross validation on the training manifest
 - train/validation curves only during training
-- test set is used only once after training
+- random temporal crop during training
+- multi-clip inference during testing
 - separate test mode is kept so you can run testing again later
 """
 
@@ -38,7 +39,9 @@ from tqdm import tqdm
 # ============================================================
 
 NUM_CLASSES = 8
-NUM_FRAMES = 32
+STORED_NUM_FRAMES = 48
+CLIP_NUM_FRAMES = 32
+TEST_NUM_CLIPS = 3
 IMAGE_SIZE = 224
 BATCH_SIZE = 8
 EPOCHS = 50
@@ -148,16 +151,22 @@ class HMDB51FrameDataset(Dataset):
     def __init__(
         self,
         dataframe: pd.DataFrame,
-        num_frames: int = NUM_FRAMES,
+        stored_num_frames: int = STORED_NUM_FRAMES,
+        clip_num_frames: int = CLIP_NUM_FRAMES,
+        test_num_clips: int = TEST_NUM_CLIPS,
         image_size: int = IMAGE_SIZE,
         is_training: bool = False,
         use_test_enhancement: bool = False,
+        multi_clip_eval: bool = False,
     ) -> None:
         self.data = dataframe.reset_index(drop=True).copy()
-        self.num_frames = num_frames
+        self.stored_num_frames = stored_num_frames
+        self.clip_num_frames = clip_num_frames
+        self.test_num_clips = test_num_clips
         self.image_size = image_size
         self.is_training = is_training
         self.use_test_enhancement = use_test_enhancement
+        self.multi_clip_eval = multi_clip_eval
         
         # 训练阶段只做轻度在线亮度/对比度扰动，
         # 避免和离线固定提亮叠加得太重。
@@ -204,19 +213,87 @@ class HMDB51FrameDataset(Dataset):
         return tensor
 
     def _load_video_frames(self, frame_dir: str) -> torch.Tensor:
-        # 最后输出 [C, T, H, W]。
-        # The final output shape is [C, T, H, W].
+        # 先读取离线保存的所有帧，默认希望是 48 帧。
+        # First read all offline-saved frames. We expect 48 frames by default.
+        #
+        # 这样后面就可以在线做：
+        # 1. 训练随机时间裁剪
+        # 2. 验证中心裁剪
+        # 3. 测试 multi-clip 推理
+        #
+        # This makes it possible to do:
+        # 1. random temporal crop for training
+        # 2. center crop for validation
+        # 3. multi-clip inference for testing
         frame_folder = Path(frame_dir)
         frames: list[torch.Tensor] = []
-        for frame_index in range(self.num_frames):
-            frame_path = frame_folder / f"frame_{frame_index:03d}.jpg"
+        frame_paths = sorted(frame_folder.glob("frame_*.jpg"))[: self.stored_num_frames]
+        if not frame_paths:
+            raise RuntimeError(f"No frame files found in {frame_folder}")
+
+        for frame_path in frame_paths:
             frames.append(self._load_one_frame(frame_path))
         return torch.stack(frames, dim=1).float()
 
+    def _pad_temporal_clip(self, video: torch.Tensor) -> torch.Tensor:
+        # 如果离线帧数少于 clip 长度，就重复最后几帧补齐。
+        # If the stored video is shorter than the clip length, repeat the last frames.
+        total_frames = video.size(1)
+        if total_frames >= self.clip_num_frames:
+            return video
+
+        repeat_count = self.clip_num_frames - total_frames
+        pad_frame = video[:, -1:, :, :].repeat(1, repeat_count, 1, 1)
+        return torch.cat([video, pad_frame], dim=1)
+
+    def _get_clip_from_start(self, video: torch.Tensor, start_index: int) -> torch.Tensor:
+        video = self._pad_temporal_clip(video)
+        max_start = max(0, video.size(1) - self.clip_num_frames)
+        start_index = min(max(0, start_index), max_start)
+        end_index = start_index + self.clip_num_frames
+        return video[:, start_index:end_index, :, :]
+
+    def _sample_training_clip(self, video: torch.Tensor) -> torch.Tensor:
+        video = self._pad_temporal_clip(video)
+        max_start = max(0, video.size(1) - self.clip_num_frames)
+        if max_start == 0:
+            return video[:, : self.clip_num_frames, :, :]
+        start_index = int(np.random.randint(0, max_start + 1))
+        return self._get_clip_from_start(video, start_index)
+
+    def _sample_center_clip(self, video: torch.Tensor) -> torch.Tensor:
+        video = self._pad_temporal_clip(video)
+        max_start = max(0, video.size(1) - self.clip_num_frames)
+        start_index = max_start // 2
+        return self._get_clip_from_start(video, start_index)
+
+    def _build_test_clips(self, video: torch.Tensor) -> torch.Tensor:
+        video = self._pad_temporal_clip(video)
+        max_start = max(0, video.size(1) - self.clip_num_frames)
+        if self.test_num_clips <= 1 or max_start == 0:
+            single_clip = self._sample_center_clip(video)
+            return torch.stack([single_clip for _ in range(self.test_num_clips)], dim=0)
+
+        start_positions = np.linspace(0, max_start, num=self.test_num_clips)
+        clips = [
+            self._get_clip_from_start(video, int(round(start_index)))
+            for start_index in start_positions
+        ]
+        return torch.stack(clips, dim=0)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         row = self.data.iloc[index]
+        video = self._load_video_frames(str(row["frame_dir"]))
+
+        if self.is_training:
+            video = self._sample_training_clip(video)
+        elif self.multi_clip_eval:
+            video = self._build_test_clips(video)
+        else:
+            video = self._sample_center_clip(video)
+
         return {
-            "video": self._load_video_frames(str(row["frame_dir"])),
+            "video": video,
             "label": torch.tensor(int(row["label"]), dtype=torch.long),
             "sample_name": str(row["sample_name"]),
             "relative_path": str(row["relative_path"]),
@@ -302,7 +379,7 @@ class BasicR3DTransformer(nn.Module):
         transformer_layers: int = TRANSFORMER_LAYERS,
         transformer_ff_dim: int = TRANSFORMER_FF_DIM,
         dropout: float = DROPOUT,
-        num_frames: int = NUM_FRAMES,
+        num_frames: int = CLIP_NUM_FRAMES,
     ) -> None:
         super().__init__()
 
@@ -494,11 +571,13 @@ def build_dataloader(
     dataframe: pd.DataFrame,
     shuffle: bool,
     use_test_enhancement: bool = False,
+    multi_clip_eval: bool = False,
 ) -> DataLoader:
     dataset = HMDB51FrameDataset(
         dataframe=dataframe,
         is_training=shuffle,
         use_test_enhancement=use_test_enhancement,
+        multi_clip_eval=multi_clip_eval,
     )
     return DataLoader(
         dataset,
@@ -508,6 +587,27 @@ def build_dataloader(
         pin_memory=torch.cuda.is_available(),
         persistent_workers=NUM_WORKERS > 0,
     )
+
+
+def forward_with_optional_multi_clip(
+    model: nn.Module,
+    videos: torch.Tensor,
+) -> torch.Tensor:
+    # 单 clip: [B, C, T, H, W]
+    # Multi-clip: [B, N, C, T, H, W]
+    # Single clip: [B, C, T, H, W]
+    # Multi-clip: [B, N, C, T, H, W]
+    if videos.dim() == 5:
+        return model(videos)
+
+    if videos.dim() != 6:
+        raise ValueError(f"Unexpected video tensor shape: {tuple(videos.shape)}")
+
+    batch_size, num_clips, channels, frames, height, width = videos.shape
+    flat_videos = videos.view(batch_size * num_clips, channels, frames, height, width)
+    clip_logits = model(flat_videos)
+    clip_logits = clip_logits.view(batch_size, num_clips, -1)
+    return clip_logits.mean(dim=1)
 
 
 def run_one_epoch(
@@ -535,7 +635,7 @@ def run_one_epoch(
             optimizer.zero_grad()
 
         with torch.set_grad_enabled(is_training):
-            logits = model(videos)
+            logits = forward_with_optional_multi_clip(model, videos)
             loss = criterion(logits, labels)
 
             if is_training:
@@ -623,7 +723,7 @@ def evaluate_with_predictions(
         for batch in tqdm(dataloader, leave=False):
             videos = batch["video"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
-            logits = model(videos)
+            logits = forward_with_optional_multi_clip(model, videos)
             loss = criterion(logits, labels)
 
             total_loss += loss.item() * labels.size(0)
@@ -739,6 +839,7 @@ def train_one_fold(
         test_df,
         shuffle=False,
         use_test_enhancement=ENABLE_TEST_ENHANCEMENT,
+        multi_clip_eval=True,
     )
     class_mapping = (
         test_df[["label", "class_name"]].drop_duplicates().sort_values("label")
@@ -873,6 +974,7 @@ def run_test_only(
         test_df,
         shuffle=False,
         use_test_enhancement=ENABLE_TEST_ENHANCEMENT,
+        multi_clip_eval=True,
     )
 
     model = build_model()
@@ -890,7 +992,7 @@ def run_test_only(
         for batch in tqdm(test_loader, desc="Testing"):
             videos = batch["video"].to(DEVICE)
             labels = batch["label"].to(DEVICE)
-            logits = model(videos)
+            logits = forward_with_optional_multi_clip(model, videos)
             loss = criterion(logits, labels)
 
             total_loss += loss.item() * labels.size(0)
