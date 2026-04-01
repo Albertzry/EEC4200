@@ -445,8 +445,6 @@ def plot_training_curves(history: list[dict[str, Any]], output_dir: Path) -> Non
     val_losses = [row["val_loss"] for row in history]
     train_accuracies = [row["train_accuracy"] for row in history]
     val_accuracies = [row["val_accuracy"] for row in history]
-    test_losses = [row.get("test_loss") for row in history]
-    test_accuracies = [row.get("test_accuracy") for row in history]
     learning_rates = [row["learning_rate"] for row in history]
 
     plt.figure(figsize=(15, 5))
@@ -454,22 +452,18 @@ def plot_training_curves(history: list[dict[str, Any]], output_dir: Path) -> Non
     plt.subplot(1, 3, 1)
     plt.plot(epochs, train_losses, marker="o", label="Train Loss")
     plt.plot(epochs, val_losses, marker="o", label="Validation Loss")
-    if all(value is not None for value in test_losses):
-        plt.plot(epochs, test_losses, marker="o", label="Test Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Train / Validation / Test Loss")
+    plt.title("Train / Validation Loss")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.4)
 
     plt.subplot(1, 3, 2)
     plt.plot(epochs, train_accuracies, marker="o", label="Train Accuracy")
     plt.plot(epochs, val_accuracies, marker="o", label="Validation Accuracy")
-    if all(value is not None for value in test_accuracies):
-        plt.plot(epochs, test_accuracies, marker="o", label="Test Accuracy")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
-    plt.title("Train / Validation / Test Accuracy")
+    plt.title("Train / Validation Accuracy")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.4)
 
