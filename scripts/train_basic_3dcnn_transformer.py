@@ -23,6 +23,7 @@ import seaborn as sns
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 from torchvision.models.video import r3d_18
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader, Dataset
@@ -70,6 +71,16 @@ OUTPUT_DIR = "outputs/arid_training_basic"
 
 NORMALIZE_MEAN = [0.5, 0.5, 0.5]
 NORMALIZE_STD = [0.5, 0.5, 0.5]
+
+# ============================================================
+# Fixed test-time enhancement
+# 测试/推理时先做固定提亮和固定对比度增强，再送进模型。
+# During testing/inference, apply fixed brightness and contrast enhancement
+# before feeding frames into the model.
+# ============================================================
+ENABLE_TEST_ENHANCEMENT = True
+TEST_BRIGHTNESS_FACTOR = 1.25
+TEST_CONTRAST_FACTOR = 1.15
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,11 +130,13 @@ class HMDB51FrameDataset(Dataset):
         num_frames: int = NUM_FRAMES,
         image_size: int = IMAGE_SIZE,
         is_training: bool = False,
+        use_test_enhancement: bool = False,
     ) -> None:
         self.data = dataframe.reset_index(drop=True).copy()
         self.num_frames = num_frames
         self.image_size = image_size
         self.is_training = is_training
+        self.use_test_enhancement = use_test_enhancement
         
         # ColorJitter for dark video augmentation
         self.color_jitter = T.ColorJitter(brightness=0.3, contrast=0.3) if is_training else None
@@ -146,6 +159,13 @@ class HMDB51FrameDataset(Dataset):
         
         if self.color_jitter:
             tensor = self.color_jitter(tensor)
+
+        # 测试时使用固定增强，而不是随机增强。
+        # Use fixed enhancement at test time instead of random augmentation.
+        if self.use_test_enhancement:
+            tensor = TF.adjust_brightness(tensor, TEST_BRIGHTNESS_FACTOR)
+            tensor = TF.adjust_contrast(tensor, TEST_CONTRAST_FACTOR)
+            tensor = torch.clamp(tensor, 0.0, 1.0)
             
         mean_tensor = torch.tensor(NORMALIZE_MEAN, dtype=torch.float32).view(-1, 1, 1)
         std_tensor = torch.tensor(NORMALIZE_STD, dtype=torch.float32).view(-1, 1, 1)
@@ -346,8 +366,16 @@ def build_model() -> nn.Module:
     return BasicR3DTransformer().to(DEVICE)
 
 
-def build_dataloader(dataframe: pd.DataFrame, shuffle: bool) -> DataLoader:
-    dataset = HMDB51FrameDataset(dataframe=dataframe, is_training=shuffle)
+def build_dataloader(
+    dataframe: pd.DataFrame,
+    shuffle: bool,
+    use_test_enhancement: bool = False,
+) -> DataLoader:
+    dataset = HMDB51FrameDataset(
+        dataframe=dataframe,
+        is_training=shuffle,
+        use_test_enhancement=use_test_enhancement,
+    )
     return DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
@@ -584,7 +612,11 @@ def run_test_only(
     class_mapping = test_df[["label", "class_name"]].drop_duplicates().sort_values("label")
     class_names = class_mapping["class_name"].tolist()
 
-    test_loader = build_dataloader(test_df, shuffle=False)
+    test_loader = build_dataloader(
+        test_df,
+        shuffle=False,
+        use_test_enhancement=ENABLE_TEST_ENHANCEMENT,
+    )
 
     model = build_model()
     state_dict = torch.load(model_path, map_location=DEVICE)
