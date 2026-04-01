@@ -55,6 +55,14 @@ TRANSFORMER_FF_DIM = 256
 DROPOUT = 0.5
 
 # ============================================================
+# Training-time light augmentation
+# 统一离线提亮之后，训练阶段只保留较轻的随机扰动。
+# After unified offline enhancement, keep only light random perturbation in training.
+# ============================================================
+TRAIN_JITTER_BRIGHTNESS = 0.15
+TRAIN_JITTER_CONTRAST = 0.05
+
+# ============================================================
 # Focal loss settings
 # 根据当前混淆矩阵，给难学类别更高权重。
 # Based on the current confusion matrix, give harder classes larger weights.
@@ -86,14 +94,14 @@ NORMALIZE_MEAN = [0.5, 0.5, 0.5]
 NORMALIZE_STD = [0.5, 0.5, 0.5]
 
 # ============================================================
-# Fixed test-time enhancement
-# 测试/推理时先做固定提亮和固定对比度增强，再送进模型。
-# During testing/inference, apply fixed brightness and contrast enhancement
-# before feeding frames into the model.
+# Optional test-time enhancement
+# 现在默认关闭，因为统一的固定提亮已经在预处理阶段完成。
+# Now disabled by default because the unified fixed enhancement is done offline
+# during preprocessing.
 # ============================================================
-ENABLE_TEST_ENHANCEMENT = True
+ENABLE_TEST_ENHANCEMENT = False
 TEST_BRIGHTNESS_FACTOR = 1.25
-TEST_CONTRAST_FACTOR = 1.15
+TEST_CONTRAST_FACTOR = 1.05
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,8 +159,18 @@ class HMDB51FrameDataset(Dataset):
         self.is_training = is_training
         self.use_test_enhancement = use_test_enhancement
         
-        # ColorJitter for dark video augmentation
-        self.color_jitter = T.ColorJitter(brightness=0.3, contrast=0.3) if is_training else None
+        # 训练阶段只做轻度在线亮度/对比度扰动，
+        # 避免和离线固定提亮叠加得太重。
+        # During training, only apply light online brightness / contrast jitter,
+        # so it does not stack too strongly with the offline fixed enhancement.
+        self.color_jitter = (
+            T.ColorJitter(
+                brightness=TRAIN_JITTER_BRIGHTNESS,
+                contrast=TRAIN_JITTER_CONTRAST,
+            )
+            if is_training
+            else None
+        )
 
     def __len__(self) -> int:
         return len(self.data)
@@ -351,10 +369,16 @@ class BasicR3DTransformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(transformer_dim)
         self.classifier = nn.Linear(transformer_dim, num_classes)
+        self.temporal_attention = nn.Sequential(
+            nn.Linear(transformer_dim, max(1, transformer_dim // 2)),
+            nn.Tanh(),
+            nn.Linear(max(1, transformer_dim // 2), 1),
+        )
 
         # 训练开始时，永久冻结一部分早期 R3D 层。
         # At the start of training, permanently freeze some early R3D layers.
         self.freeze_early_r3d_layers()
+        self.set_frozen_batchnorm_eval()
 
     def freeze_early_r3d_layers(self) -> None:
         # 这个函数只负责把前面几层设成不更新。
@@ -369,10 +393,38 @@ class BasicR3DTransformer(nn.Module):
             for param in self.layer2.parameters():
                 param.requires_grad = False
 
+    def set_frozen_batchnorm_eval(self) -> None:
+        # 冻结层中的 BatchNorm 也固定在 eval 模式，
+        # 避免 running mean / var 继续向训练集分布漂移。
+        # Keep BatchNorm inside frozen blocks in eval mode as well,
+        # so running mean / var do not keep drifting toward the training set.
+        frozen_blocks: list[nn.Module] = []
+        if FREEZE_R3D_STEM:
+            frozen_blocks.append(self.stem)
+        if FREEZE_R3D_LAYER1:
+            frozen_blocks.append(self.layer1)
+        if FREEZE_R3D_LAYER2:
+            frozen_blocks.append(self.layer2)
+
+        for block in frozen_blocks:
+            for module in block.modules():
+                if isinstance(module, nn.BatchNorm3d):
+                    module.eval()
+                    for param in module.parameters():
+                        param.requires_grad = False
+
     def count_trainable_parameters(self) -> int:
         # 方便在日志里查看当前有多少参数在训练。
         # Useful for logging how many parameters are currently trainable.
         return sum(param.numel() for param in self.parameters() if param.requires_grad)
+
+    def train(self, mode: bool = True) -> nn.Module:
+        # 每次进入 train() 时，都重新把冻结层里的 BN 固定住。
+        # Every time train() is called, keep BN inside frozen blocks fixed.
+        super().train(mode)
+        if mode:
+            self.set_frozen_batchnorm_eval()
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # 输入: [B, 3, 32, 224, 224]
@@ -409,9 +461,13 @@ class BasicR3DTransformer(nn.Module):
         # Transformer processes the full time sequence
         x = self.transformer(x)
 
-        # 对时间维求平均，得到整段视频的表示
-        # Average over time to get one representation for the whole video
-        x = x.mean(dim=1)
+        # 用时间注意力池化替代简单平均，
+        # 让模型自动更关注关键帧。
+        # Use temporal attention pooling instead of simple averaging,
+        # so the model can focus more on important frames.
+        attention_scores = self.temporal_attention(x).squeeze(-1)
+        attention_weights = torch.softmax(attention_scores, dim=1).unsqueeze(-1)
+        x = (x * attention_weights).sum(dim=1)
         x = self.dropout(x)
         x = self.layer_norm(x)
 

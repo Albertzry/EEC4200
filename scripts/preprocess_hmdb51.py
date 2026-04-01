@@ -34,6 +34,16 @@ class ResizeConfig:
 
 
 @dataclass
+class LowLightEnhancementConfig:
+    enabled: bool
+    gamma: float
+    clahe_clip_limit: float
+    clahe_grid_size: int
+    brightness_gain: float
+    contrast_gain: float
+
+
+@dataclass
 class PreprocessConfig:
     dataset_name: str
     root_dir: str
@@ -48,6 +58,7 @@ class PreprocessConfig:
     jpeg_quality: int
     allowed_extensions: list[str]
     resize: ResizeConfig
+    low_light_enhancement: LowLightEnhancementConfig
     augmentations: dict[str, Any]
 
 
@@ -97,6 +108,7 @@ def build_runtime_config(args: argparse.Namespace) -> PreprocessConfig:
     raw_config = load_json(args.config)
     dataset_cfg = raw_config["dataset"]
     preprocess_cfg = raw_config["preprocess"]
+    low_light_cfg = preprocess_cfg.get("low_light_enhancement", {})
 
     return PreprocessConfig(
         dataset_name=dataset_cfg.get("name", "dataset"),
@@ -114,6 +126,14 @@ def build_runtime_config(args: argparse.Namespace) -> PreprocessConfig:
         resize=ResizeConfig(
             width=int(preprocess_cfg["target_width"]),
             height=int(preprocess_cfg["target_height"]),
+        ),
+        low_light_enhancement=LowLightEnhancementConfig(
+            enabled=bool(low_light_cfg.get("enabled", False)),
+            gamma=float(low_light_cfg.get("gamma", 1.0)),
+            clahe_clip_limit=float(low_light_cfg.get("clahe_clip_limit", 0.0)),
+            clahe_grid_size=int(low_light_cfg.get("clahe_grid_size", 8)),
+            brightness_gain=float(low_light_cfg.get("brightness_gain", 1.0)),
+            contrast_gain=float(low_light_cfg.get("contrast_gain", 1.0)),
         ),
         augmentations=dict(preprocess_cfg["augmentations"]),
     )
@@ -151,7 +171,53 @@ def parse_split_file(split_path: str, split_name: str, dataset_root: str) -> lis
     return samples
 
 
-def read_video_frames(video_path: str, resize: ResizeConfig) -> tuple[list[np.ndarray], float]:
+def apply_low_light_enhancement(
+    frame: np.ndarray,
+    config: LowLightEnhancementConfig,
+) -> np.ndarray:
+    if not config.enabled:
+        return frame
+
+    output = frame.copy()
+
+    # 用 gamma 提亮暗部。gamma > 1 时会让暗区域更亮。
+    # Use gamma correction to brighten dark regions. gamma > 1 makes dark pixels brighter.
+    if abs(config.gamma - 1.0) > 1e-6:
+        gamma_value = max(config.gamma, 1e-6)
+        table = np.array(
+            [((index / 255.0) ** (1.0 / gamma_value)) * 255 for index in range(256)],
+            dtype=np.uint8,
+        )
+        output = cv2.LUT(output, table)
+
+    # CLAHE 只在亮度通道上做局部对比度增强。
+    # Apply CLAHE only on the luminance channel for local contrast enhancement.
+    if config.clahe_clip_limit > 0:
+        grid_size = max(1, config.clahe_grid_size)
+        lab = cv2.cvtColor(output, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(
+            clipLimit=config.clahe_clip_limit,
+            tileGridSize=(grid_size, grid_size),
+        )
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        output = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # 最后再做轻度整体提亮和对比度增强。
+    # Finally apply mild global brightness and contrast enhancement.
+    output_float = output.astype(np.float32)
+    if abs(config.brightness_gain - 1.0) > 1e-6:
+        output_float = output_float * config.brightness_gain
+    if abs(config.contrast_gain - 1.0) > 1e-6:
+        mean = output_float.mean(axis=(0, 1), keepdims=True)
+        output_float = (output_float - mean) * config.contrast_gain + mean
+    return np.clip(output_float, 0, 255).astype(np.uint8)
+
+
+def read_video_frames(
+    video_path: str,
+    resize: ResizeConfig,
+    low_light_enhancement: LowLightEnhancementConfig,
+) -> tuple[list[np.ndarray], float]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -165,7 +231,12 @@ def read_video_frames(video_path: str, resize: ResizeConfig) -> tuple[list[np.nd
         success, frame = cap.read()
         if not success:
             break
-        resized = cv2.resize(frame, (resize.width, resize.height), interpolation=cv2.INTER_LINEAR)
+        enhanced = apply_low_light_enhancement(frame, low_light_enhancement)
+        resized = cv2.resize(
+            enhanced,
+            (resize.width, resize.height),
+            interpolation=cv2.INTER_LINEAR,
+        )
         frames.append(resized)
 
     cap.release()
@@ -604,7 +675,11 @@ def process_single_video(
         return [], summary
 
     try:
-        frames, original_fps = read_video_frames(str(video_path), config.resize)
+        frames, original_fps = read_video_frames(
+            str(video_path),
+            config.resize,
+            config.low_light_enhancement,
+        )
         fps_frames = resample_frames_to_target_fps(frames, original_fps, config.target_fps)
         selected_frames = select_fixed_length_frames(fps_frames, config.num_frames)
     except Exception as error:  # pragma: no cover

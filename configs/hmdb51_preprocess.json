@@ -1,6 +1,6 @@
 {
   "dataset": {
-    "name": "HMDB51-mini-action-set",
+    "name": "ARID-mini-action-set",
     "root_dir": "/opt/data/private/EEC4200/ARID",
     "train_list": "/opt/data/private/EEC4200/arid_train.txt",
     "test_list": "/opt/data/private/EEC4200/arid_test.txt"
@@ -17,11 +17,11 @@
     "jpeg_quality": 95,
     "low_light_enhancement": {
       "enabled": true,
-      "gamma": 3.2,
-      "clahe_clip_limit": 6.0,
+      "gamma": 1.0,
+      "clahe_clip_limit": 0.0,
       "clahe_grid_size": 8,
-      "brightness_gain": 1.5,
-      "contrast_gain": 1.25
+      "brightness_gain": 1.25,
+      "contrast_gain": 1.05
     },
     "allowed_extensions": [
       ".avi",
