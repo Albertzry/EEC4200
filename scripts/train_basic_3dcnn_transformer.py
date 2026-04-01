@@ -22,6 +22,7 @@ import pandas as pd
 import seaborn as sns
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from torchvision.models.video import r3d_18
@@ -52,6 +53,18 @@ TRANSFORMER_HEADS = 4
 TRANSFORMER_LAYERS = 1
 TRANSFORMER_FF_DIM = 256
 DROPOUT = 0.5
+
+# ============================================================
+# Focal loss settings
+# 根据当前混淆矩阵，给难学类别更高权重。
+# Based on the current confusion matrix, give harder classes larger weights.
+#
+# Class order:
+# [Drink, Jump, Pick, Pour, Push, Run, Walk, Wave]
+# ============================================================
+USE_FOCAL_LOSS = True
+FOCAL_GAMMA = 2.0
+FOCAL_ALPHA = [2.0, 3.0, 1.2, 1.0, 0.8, 3.5, 3.0, 2.0]
 
 # ============================================================
 # Freeze settings for the R3D backbone
@@ -201,6 +214,53 @@ class BasicPositionalEncoding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.position_embedding[:, : x.size(1), :]
+
+
+class FocalLoss(nn.Module):
+    # 这是一个最基础的 Focal Loss 实现。
+    # This is a very basic Focal Loss implementation.
+    #
+    # 作用：
+    # 1. 减少“容易样本”对总 loss 的影响
+    # 2. 让模型更关注“难样本”
+    # 3. 配合 alpha 权重后，也能更关注某些更难学的类别
+    #
+    # Purpose:
+    # 1. Reduce the contribution from easy samples
+    # 2. Make the model focus more on hard samples
+    # 3. With alpha weights, focus more on hard classes as well
+    def __init__(
+        self,
+        alpha: list[float] | None = None,
+        gamma: float = FOCAL_GAMMA,
+        reduction: str = "mean",
+    ) -> None:
+        super().__init__()
+        if alpha is None:
+            self.alpha = None
+        else:
+            self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(logits, dim=1)
+        log_pt = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        pt = log_pt.exp()
+
+        ce_loss = -log_pt
+        focal_factor = (1.0 - pt) ** self.gamma
+        loss = focal_factor * ce_loss
+
+        if hasattr(self, "alpha") and self.alpha is not None:
+            alpha_t = self.alpha[targets]
+            loss = alpha_t * loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
 
 
 class BasicR3DTransformer(nn.Module):
@@ -366,6 +426,14 @@ def build_model() -> nn.Module:
     return BasicR3DTransformer().to(DEVICE)
 
 
+def build_criterion() -> nn.Module:
+    # 这里统一创建 loss，后面训练和测试都复用。
+    # Build the loss function in one place so training and testing can reuse it.
+    if USE_FOCAL_LOSS:
+        return FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA).to(DEVICE)
+    return nn.CrossEntropyLoss().to(DEVICE)
+
+
 def build_dataloader(
     dataframe: pd.DataFrame,
     shuffle: bool,
@@ -523,7 +591,13 @@ def save_test_artifacts(
     class_names: list[str],
     epoch: int | None = None,
 ) -> None:
-    report = classification_report(labels, preds, target_names=class_names, digits=4)
+    report = classification_report(
+        labels,
+        preds,
+        target_names=class_names,
+        digits=4,
+        zero_division=0,
+    )
     cm = confusion_matrix(labels, preds)
 
     report_path = output_dir / f"{prefix}_classification_report.txt"
@@ -616,7 +690,7 @@ def train_one_fold(
     class_names = class_mapping["class_name"].tolist()
 
     model = build_model()
-    criterion = nn.CrossEntropyLoss()
+    criterion = build_criterion()
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=LEARNING_RATE,
@@ -749,7 +823,7 @@ def run_test_only(
     state_dict = torch.load(model_path, map_location=DEVICE)
     model.load_state_dict(state_dict)
     model.eval()
-    criterion = nn.CrossEntropyLoss()
+    criterion = build_criterion()
 
     total_loss = 0.0
     all_preds = []
@@ -774,7 +848,11 @@ def run_test_only(
 
     # Generate and print classification report
     report = classification_report(
-        all_labels, all_preds, target_names=class_names, digits=4
+        all_labels,
+        all_preds,
+        target_names=class_names,
+        digits=4,
+        zero_division=0,
     )
     print("\n===== Classification Report =====")
     print(report)
