@@ -445,6 +445,8 @@ def plot_training_curves(history: list[dict[str, Any]], output_dir: Path) -> Non
     val_losses = [row["val_loss"] for row in history]
     train_accuracies = [row["train_accuracy"] for row in history]
     val_accuracies = [row["val_accuracy"] for row in history]
+    test_losses = [row.get("test_loss") for row in history]
+    test_accuracies = [row.get("test_accuracy") for row in history]
     learning_rates = [row["learning_rate"] for row in history]
 
     plt.figure(figsize=(15, 5))
@@ -452,18 +454,22 @@ def plot_training_curves(history: list[dict[str, Any]], output_dir: Path) -> Non
     plt.subplot(1, 3, 1)
     plt.plot(epochs, train_losses, marker="o", label="Train Loss")
     plt.plot(epochs, val_losses, marker="o", label="Validation Loss")
+    if all(value is not None for value in test_losses):
+        plt.plot(epochs, test_losses, marker="o", label="Test Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Train / Validation Loss")
+    plt.title("Train / Validation / Test Loss")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.4)
 
     plt.subplot(1, 3, 2)
     plt.plot(epochs, train_accuracies, marker="o", label="Train Accuracy")
     plt.plot(epochs, val_accuracies, marker="o", label="Validation Accuracy")
+    if all(value is not None for value in test_accuracies):
+        plt.plot(epochs, test_accuracies, marker="o", label="Test Accuracy")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
-    plt.title("Train / Validation Accuracy")
+    plt.title("Train / Validation / Test Accuracy")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.4)
 
@@ -482,6 +488,89 @@ def plot_training_curves(history: list[dict[str, Any]], output_dir: Path) -> Non
 
 def save_history(history: list[dict[str, Any]], output_dir: Path) -> None:
     pd.DataFrame(history).to_csv(output_dir / "history.csv", index=False)
+
+
+def evaluate_with_predictions(
+    model: nn.Module,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    device: str,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    model.eval()
+    total_loss = 0.0
+    all_preds: list[int] = []
+    all_labels: list[int] = []
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, leave=False):
+            videos = batch["video"].to(device, non_blocking=True)
+            labels = batch["label"].to(device, non_blocking=True)
+            logits = model(videos)
+            loss = criterion(logits, labels)
+
+            total_loss += loss.item() * labels.size(0)
+            all_preds.extend(torch.argmax(logits, dim=1).cpu().numpy().tolist())
+            all_labels.extend(labels.cpu().numpy().tolist())
+
+    labels_array = np.array(all_labels)
+    preds_array = np.array(all_preds)
+    average_loss = total_loss / len(dataloader.dataset)
+    accuracy = float((preds_array == labels_array).mean())
+    return average_loss, accuracy, preds_array, labels_array
+
+
+def save_test_artifacts(
+    output_dir: Path,
+    prefix: str,
+    loss_value: float,
+    accuracy: float,
+    labels: np.ndarray,
+    preds: np.ndarray,
+    class_names: list[str],
+    epoch: int | None = None,
+) -> None:
+    report = classification_report(labels, preds, target_names=class_names, digits=4)
+    cm = confusion_matrix(labels, preds)
+
+    report_path = output_dir / f"{prefix}_classification_report.txt"
+    with open(report_path, "w", encoding="utf-8") as file:
+        file.write(report)
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=class_names,
+        yticklabels=class_names,
+    )
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    cm_path = output_dir / f"{prefix}_confusion_matrix.png"
+    plt.savefig(cm_path, dpi=200)
+    plt.close()
+
+    epoch_line = f"- **Epoch:** {epoch}\n" if epoch is not None else ""
+    md_content = f"""# Test Results Summary
+
+## Performance Summary
+{epoch_line}- **Test Loss:** {loss_value:.6f}
+- **Test Accuracy:** {accuracy:.4f} ({accuracy * 100:.2f}%)
+
+## Classification Report
+```text
+{report}
+```
+
+## Confusion Matrix
+![Confusion Matrix]({cm_path.name})
+"""
+    summary_path = output_dir / f"{prefix}_summary.md"
+    with open(summary_path, "w", encoding="utf-8") as file:
+        file.write(md_content)
 
 
 def build_grouped_folds(train_df: pd.DataFrame, num_folds: int) -> list[set[str]]:
@@ -514,6 +603,7 @@ def train_one_fold(
     fold_index: int,
     train_part: pd.DataFrame,
     val_part: pd.DataFrame,
+    test_df: pd.DataFrame,
     output_dir: Path,
 ) -> dict[str, Any]:
     fold_dir = output_dir / f"fold_{fold_index + 1}"
@@ -521,6 +611,15 @@ def train_one_fold(
 
     train_loader = build_dataloader(train_part, shuffle=True)
     val_loader = build_dataloader(val_part, shuffle=False)
+    test_loader = build_dataloader(
+        test_df,
+        shuffle=False,
+        use_test_enhancement=ENABLE_TEST_ENHANCEMENT,
+    )
+    class_mapping = (
+        test_df[["label", "class_name"]].drop_duplicates().sort_values("label")
+    )
+    class_names = class_mapping["class_name"].tolist()
 
     model = build_model()
     criterion = nn.CrossEntropyLoss()
@@ -540,10 +639,14 @@ def train_one_fold(
     history: list[dict[str, Any]] = []
     best_val_accuracy = -1.0
     best_epoch = -1
+    best_test_accuracy = -1.0
+    best_test_epoch = -1
+    best_test_loss = float("inf")
 
     print(f"\n===== Fold {fold_index + 1}/{NUM_FOLDS} =====")
     print(f"Train samples: {len(train_part)}")
     print(f"Validation samples: {len(val_part)}")
+    print(f"Test samples: {len(test_df)}")
     if isinstance(model, BasicR3DTransformer):
         print(
             f"Trainable parameters after permanent freezing: "
@@ -567,6 +670,12 @@ def train_one_fold(
             criterion=criterion,
             device=DEVICE,
         )
+        test_loss, test_accuracy, test_preds, test_labels = evaluate_with_predictions(
+            model=model,
+            dataloader=test_loader,
+            criterion=criterion,
+            device=DEVICE,
+        )
 
         history.append(
             {
@@ -575,6 +684,8 @@ def train_one_fold(
                 "train_accuracy": round(train_accuracy, 6),
                 "val_loss": round(val_loss, 6),
                 "val_accuracy": round(val_accuracy, 6),
+                "test_loss": round(test_loss, 6),
+                "test_accuracy": round(test_accuracy, 6),
                 "learning_rate": current_lr,
             }
         )
@@ -586,6 +697,8 @@ def train_one_fold(
             f"train_accuracy={train_accuracy:.4f}, "
             f"val_loss={val_loss:.4f}, "
             f"val_accuracy={val_accuracy:.4f}, "
+            f"test_loss={test_loss:.4f}, "
+            f"test_accuracy={test_accuracy:.4f}, "
             f"learning_rate={current_lr:.6f}"
         )
 
@@ -593,6 +706,22 @@ def train_one_fold(
             best_val_accuracy = val_accuracy
             best_epoch = epoch
             torch.save(model.state_dict(), fold_dir / "best_model.pth")
+
+        if test_accuracy > best_test_accuracy:
+            best_test_accuracy = test_accuracy
+            best_test_epoch = epoch
+            best_test_loss = test_loss
+            torch.save(model.state_dict(), fold_dir / "best_test_model.pth")
+            save_test_artifacts(
+                output_dir=fold_dir,
+                prefix="best_test",
+                loss_value=test_loss,
+                accuracy=test_accuracy,
+                labels=test_labels,
+                preds=test_preds,
+                class_names=class_names,
+                epoch=epoch,
+            )
 
         scheduler.step()
 
@@ -602,6 +731,10 @@ def train_one_fold(
         "best_epoch": best_epoch,
         "model_path": str(fold_dir / "best_model.pth"),
         "history_path": str(fold_dir / "history.csv"),
+        "best_test_accuracy": best_test_accuracy,
+        "best_test_epoch": best_test_epoch,
+        "best_test_loss": best_test_loss,
+        "best_test_model_path": str(fold_dir / "best_test_model.pth"),
     }
 
 
@@ -728,6 +861,7 @@ def run_training(args: argparse.Namespace) -> None:
             fold_index=fold_index,
             train_part=train_part,
             val_part=val_part,
+            test_df=test_df,
             output_dir=output_dir,
         )
         fold_results.append(fold_result)
@@ -735,20 +869,18 @@ def run_training(args: argparse.Namespace) -> None:
     fold_summary = pd.DataFrame(fold_results)
     fold_summary.to_csv(output_dir / "cross_validation_summary.csv", index=False)
 
-    best_row = fold_summary.sort_values("best_val_accuracy", ascending=False).iloc[0]
-    best_model_path = str(best_row["model_path"])
+    best_row = fold_summary.sort_values("best_test_accuracy", ascending=False).iloc[0]
+    best_model_path = str(best_row["best_test_model_path"])
 
     print("\n===== Cross Validation Summary =====")
     print(fold_summary.to_string(index=False))
-    print(f"\nBest fold model: {best_model_path}")
+    print(f"\nBest fold test model: {best_model_path}")
 
-    # 训练全部完成后，test 只跑一次
-    # After all folds finish, run test only once
-    test_loss, test_accuracy = run_test_only(
-        best_model_path, args.test_manifest, output_dir=output_dir
-    )
+    test_loss = float(best_row["best_test_loss"])
+    test_accuracy = float(best_row["best_test_accuracy"])
     print("\n===== Final Test Result Summary =====")
     print(f"Best Fold: {best_row['fold']}")
+    print(f"Best Test Epoch: {best_row['best_test_epoch']}")
     print(f"Test Loss: {test_loss:.4f}")
     print(f"Test Accuracy: {test_accuracy:.4f}")
 
