@@ -6,7 +6,7 @@
     "test_list": "/opt/data/private/EEC4200/arid_test.txt"
   },
   "preprocess": {
-    "output_dir": "outputs/arid_preprocessed",
+    "output_dir": "/opt/data/private/EEC4200/outputs/arid_preprocessed",
     "target_width": 224,
     "target_height": 224,
     "target_fps": 16.0,

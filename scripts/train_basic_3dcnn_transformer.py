@@ -51,10 +51,10 @@ WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
 R3D_FEATURE_DIM = 512
-TRANSFORMER_DIM = 128
-TRANSFORMER_HEADS = 4
+TRANSFORMER_DIM = 64
+TRANSFORMER_HEADS = 2
 TRANSFORMER_LAYERS = 1
-TRANSFORMER_FF_DIM = 256
+TRANSFORMER_FF_DIM = 128
 DROPOUT = 0.5
 
 # ============================================================
@@ -89,9 +89,9 @@ FREEZE_R3D_LAYER2 = True
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TRAIN_MANIFEST_PATH = "outputs/arid_preprocessed/train_manifest.csv"
-TEST_MANIFEST_PATH = "outputs/arid_preprocessed/test_manifest.csv"
-OUTPUT_DIR = "outputs/arid_training_basic"
+TRAIN_MANIFEST_PATH = "/opt/data/private/EEC4200/outputs/arid_preprocessed/train_manifest.csv"
+TEST_MANIFEST_PATH = "/opt/data/private/EEC4200/outputs/arid_preprocessed/test_manifest.csv"
+OUTPUT_DIR = "/opt/data/private/EEC4200/outputs/arid_training_basic"
 
 NORMALIZE_MEAN = [0.5, 0.5, 0.5]
 NORMALIZE_STD = [0.5, 0.5, 0.5]
