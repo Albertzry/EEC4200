@@ -797,18 +797,51 @@ def save_test_artifacts(
         file.write(md_content)
 
 
+def build_original_sample_mask(dataframe: pd.DataFrame) -> pd.Series:
+    # validation 应尽量只看原始样本，不看离线增强样本。
+    # Validation should ideally only use original samples, not offline-augmented ones.
+    if "is_augmented" not in dataframe.columns and "augmentation_id" not in dataframe.columns:
+        return pd.Series([True] * len(dataframe), index=dataframe.index)
+
+    original_mask = pd.Series([False] * len(dataframe), index=dataframe.index)
+
+    if "augmentation_id" in dataframe.columns:
+        augmentation_ids = pd.to_numeric(
+            dataframe["augmentation_id"],
+            errors="coerce",
+        ).fillna(-1)
+        original_mask = original_mask | (augmentation_ids == 0)
+
+    if "is_augmented" in dataframe.columns:
+        is_augmented_values = (
+            dataframe["is_augmented"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        original_mask = original_mask | is_augmented_values.isin(
+            ["false", "0", "no", "n"]
+        )
+
+    return original_mask
+
+
 def build_grouped_folds(train_df: pd.DataFrame, num_folds: int) -> list[set[str]]:
     # 关键点：
-    # 同一个原视频(relative_path)的原始样本和增强样本必须进同一折，
-    # 否则会出现训练/验证泄漏。
+    # 五折划分只基于原始样本做，避免 validation 被增强样本“抬高”。
+    # 同一个原视频(relative_path)的原始样本和增强样本仍然视为同一组，
+    # 训练时可以把该组的增强样本带上，验证时只保留原始样本。
     #
     # Key point:
-    # The original sample and all augmented samples from the same relative_path
-    # must stay in the same fold, otherwise train/validation leakage happens.
+    # Build folds from original samples only, so validation is not artificially
+    # inflated by augmented samples. The original sample and its augmented samples
+    # are still treated as one group through relative_path.
     folds: list[set[str]] = [set() for _ in range(num_folds)]
+    original_mask = build_original_sample_mask(train_df)
+    original_df = train_df[original_mask].copy()
 
     grouped = (
-        train_df[["relative_path", "label"]]
+        original_df[["relative_path", "label"]]
         .drop_duplicates()
         .sort_values(["label", "relative_path"])
     )
@@ -872,6 +905,16 @@ def train_one_fold(
     print(f"Train samples: {len(train_part)}")
     print(f"Validation samples: {len(val_part)}")
     print(f"Test samples: {len(test_df)}")
+    train_original_mask = build_original_sample_mask(train_part)
+    val_original_mask = build_original_sample_mask(val_part)
+    print(
+        f"Train originals: {int(train_original_mask.sum())} | "
+        f"Train augmented: {len(train_part) - int(train_original_mask.sum())}"
+    )
+    print(
+        f"Validation originals: {int(val_original_mask.sum())} | "
+        f"Validation augmented: {len(val_part) - int(val_original_mask.sum())}"
+    )
     if isinstance(model, BasicR3DTransformer):
         print(
             f"Trainable parameters after permanent freezing: "
@@ -1081,11 +1124,12 @@ def run_training(args: argparse.Namespace) -> None:
 
     folds = build_grouped_folds(train_df, NUM_FOLDS)
     fold_results: list[dict[str, Any]] = []
+    original_mask = build_original_sample_mask(train_df)
 
     for fold_index, val_relative_paths in enumerate(folds):
-        val_mask = train_df["relative_path"].isin(val_relative_paths)
-        val_part = train_df[val_mask].copy()
-        train_part = train_df[~val_mask].copy()
+        in_val_fold = train_df["relative_path"].isin(val_relative_paths)
+        val_part = train_df[in_val_fold & original_mask].copy()
+        train_part = train_df[~in_val_fold].copy()
 
         fold_result = train_one_fold(
             fold_index=fold_index,

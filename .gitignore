@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 outputs/
+
+tools/
+tmp/
+.codex_pdf_libs/
+output/
