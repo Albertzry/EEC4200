@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Basic R3D + Transformer training script for fixed-length frame folders.
+Basic R3D training script for fixed-length frame folders.
 
 This version keeps the training pipeline readable for beginners:
 - 5-fold cross validation on the training manifest
@@ -51,10 +51,6 @@ WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
 R3D_FEATURE_DIM = 512
-TRANSFORMER_DIM = 64
-TRANSFORMER_HEADS = 2
-TRANSFORMER_LAYERS = 1
-TRANSFORMER_FF_DIM = 128
 DROPOUT = 0.5
 
 # ============================================================
@@ -109,7 +105,7 @@ TEST_CONTRAST_FACTOR = 1.05
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Basic 3D CNN + Transformer with 5-fold validation."
+        description="Basic R3D classifier with 5-fold validation."
     )
     parser.add_argument(
         "--mode",
@@ -300,17 +296,6 @@ class HMDB51FrameDataset(Dataset):
         }
 
 
-class BasicPositionalEncoding(nn.Module):
-    # Transformer 自己不知道第几帧在前、第几帧在后，所以这里加位置编码。
-    # The Transformer does not know frame order by itself, so we add positional encoding.
-    def __init__(self, max_length: int, embed_dim: int) -> None:
-        super().__init__()
-        self.position_embedding = nn.Parameter(torch.randn(1, max_length, embed_dim) * 0.02)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.position_embedding[:, : x.size(1), :]
-
-
 class FocalLoss(nn.Module):
     # 这是一个最基础的 Focal Loss 实现。
     # This is a very basic Focal Loss implementation.
@@ -358,28 +343,23 @@ class FocalLoss(nn.Module):
         return loss
 
 
-class BasicR3DTransformer(nn.Module):
+class BasicR3DClassifier(nn.Module):
     # 模型主思路：
     # 1. 输入是一个视频张量 [B, 3, T, H, W]
     # 2. 先用最基础的 R3D-18 backbone 提取更成熟的时空特征
-    # 3. 再把这些时间特征送进 Transformer
+    # 3. 再直接做时间维聚合
     # 4. 最后用全连接层做分类
     #
     # Main idea:
     # 1. Input is a video tensor [B, 3, T, H, W]
     # 2. Use a basic R3D-18 backbone to extract stronger spatio-temporal features
-    # 3. Feed the time sequence into a Transformer
+    # 3. Aggregate features over time directly
     # 4. Use a linear layer for final classification
     def __init__(
         self,
         num_classes: int = NUM_CLASSES,
         r3d_feature_dim: int = R3D_FEATURE_DIM,
-        transformer_dim: int = TRANSFORMER_DIM,
-        transformer_heads: int = TRANSFORMER_HEADS,
-        transformer_layers: int = TRANSFORMER_LAYERS,
-        transformer_ff_dim: int = TRANSFORMER_FF_DIM,
         dropout: float = DROPOUT,
-        num_frames: int = CLIP_NUM_FRAMES,
     ) -> None:
         super().__init__()
 
@@ -393,12 +373,12 @@ class BasicR3DTransformer(nn.Module):
         # 这样做的原因是：
         # 1. R3D 是更成熟的 3D CNN backbone
         # 2. 它比手写的几层 Conv3d 更容易提取有效时空特征
-        # 3. 我们后面还要接 Transformer，所以这里只需要特征，不要最终分类结果
+        # 3. 现在我们先测试纯 R3D，所以这里只需要 backbone 特征，不用最终 fc
         #
         # Why:
         # 1. R3D is a more mature 3D CNN backbone
         # 2. It usually extracts better video features than a few hand-written Conv3d layers
-        # 3. We still want to use a Transformer later, so we only need backbone features here
+        # 3. We test a pure R3D model first, so we only keep the backbone features
         backbone = r3d_18(weights=None)
         self.stem = backbone.stem
         self.layer1 = backbone.layer1
@@ -406,50 +386,19 @@ class BasicR3DTransformer(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-        # 第二部分：把 R3D 的输出变成 Transformer 能读的序列
-        # Second part: turn the R3D output into a sequence for the Transformer
+        # 第二部分：时间维聚合 + 分类头
+        # Second part: temporal aggregation + classification head
         #
-        # 经过 R3D 后，张量仍然是 5 维：[B, C, T', H', W']
-        # After R3D, the tensor is still 5D: [B, C, T', H', W']
-        #
-        # 我们先对空间维 H' 和 W' 求平均，只保留时间维 T'
-        # Then we average over H' and W' to keep only the temporal sequence T'
-        #
-        # 这样每个时间步都会得到一个长度为 C 的特征向量
-        # This gives one C-dimensional feature vector for each time step
-        self.feature_projection = nn.Linear(r3d_feature_dim, transformer_dim)
-        self.position_encoding = BasicPositionalEncoding(num_frames, transformer_dim)
-
-        # 第三部分：Transformer encoder
-        # Third part: Transformer encoder
-        #
-        # 这里保留你原来的思路：R3D 先提局部到中层时空特征，
-        # Transformer 再看更长范围的时间关系。
-        #
-        # We keep your original idea here:
-        # R3D extracts local / mid-level spatio-temporal features first,
-        # then the Transformer models longer temporal relationships.
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=transformer_dim,
-            nhead=transformer_heads,
-            dim_feedforward=transformer_ff_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=transformer_layers,
-        )
-
-        # 最后是分类头
-        # Final classification head
+        # 这里先不接 Transformer，先看看更简单的纯 R3D 是否更容易泛化。
+        # We remove the Transformer for now so we can test whether a simpler
+        # pure R3D model generalizes better.
         self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(transformer_dim)
-        self.classifier = nn.Linear(transformer_dim, num_classes)
+        self.layer_norm = nn.LayerNorm(r3d_feature_dim)
+        self.classifier = nn.Linear(r3d_feature_dim, num_classes)
         self.temporal_attention = nn.Sequential(
-            nn.Linear(transformer_dim, max(1, transformer_dim // 2)),
+            nn.Linear(r3d_feature_dim, max(1, r3d_feature_dim // 2)),
             nn.Tanh(),
-            nn.Linear(max(1, transformer_dim // 2), 1),
+            nn.Linear(max(1, r3d_feature_dim // 2), 1),
         )
 
         # 训练开始时，永久冻结一部分早期 R3D 层。
@@ -522,21 +471,9 @@ class BasicR3DTransformer(nn.Module):
         x = x.mean(dim=4).mean(dim=3)
 
         # [B, C, T'] -> [B, T', C]
-        # Transformer 更喜欢 [batch, time, feature] 这样的格式
-        # Transformer prefers [batch, time, feature]
+        # 这里虽然不再用 Transformer，但把时间维放到中间更方便做时间注意力池化。
+        # Even without the Transformer, [B, T', C] is convenient for temporal attention pooling.
         x = x.permute(0, 2, 1)
-
-        # 把 R3D 特征映射到 Transformer 的特征维度
-        # Project R3D features into the Transformer feature dimension
-        x = self.feature_projection(x)
-
-        # 加入位置信息，让模型知道帧顺序
-        # Add position information so the model knows frame order
-        x = self.position_encoding(x)
-
-        # Transformer 处理整个时间序列
-        # Transformer processes the full time sequence
-        x = self.transformer(x)
 
         # 用时间注意力池化替代简单平均，
         # 让模型自动更关注关键帧。
@@ -556,7 +493,7 @@ class BasicR3DTransformer(nn.Module):
 def build_model() -> nn.Module:
     # 单独写一个 build_model，后面训练和测试都复用。
     # Keep model creation in one place so both training and testing reuse it.
-    return BasicR3DTransformer().to(DEVICE)
+    return BasicR3DClassifier().to(DEVICE)
 
 
 def build_criterion() -> nn.Module:
@@ -915,7 +852,7 @@ def train_one_fold(
         f"Validation originals: {int(val_original_mask.sum())} | "
         f"Validation augmented: {len(val_part) - int(val_original_mask.sum())}"
     )
-    if isinstance(model, BasicR3DTransformer):
+    if isinstance(model, BasicR3DClassifier):
         print(
             f"Trainable parameters after permanent freezing: "
             f"{model.count_trainable_parameters():,}"
@@ -1114,7 +1051,7 @@ def run_training(args: argparse.Namespace) -> None:
     train_df = pd.read_csv(args.train_manifest)
     test_df = pd.read_csv(args.test_manifest)
 
-    print("===== Basic R3D + Transformer 5-Fold Training =====")
+    print("===== Basic R3D 5-Fold Training =====")
     print(f"Device: {DEVICE}")
     print(f"Train manifest: {args.train_manifest}")
     print(f"Test manifest: {args.test_manifest}")
