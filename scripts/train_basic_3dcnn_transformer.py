@@ -28,7 +28,7 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from torchvision.models.video import r3d_18
 from sklearn.metrics import classification_report, confusion_matrix
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 
 
@@ -58,8 +58,9 @@ DROPOUT = 0.5
 # 统一离线提亮之后，训练阶段只保留较轻的随机扰动。
 # After unified offline enhancement, keep only light random perturbation in training.
 # ============================================================
-TRAIN_JITTER_BRIGHTNESS = 0.10
-TRAIN_JITTER_CONTRAST = 0.03
+TRAIN_JITTER_BRIGHTNESS = 0.0
+TRAIN_JITTER_CONTRAST = 0.0
+USE_WEIGHTED_SAMPLER = True
 
 # ============================================================
 # Focal loss settings
@@ -75,12 +76,12 @@ FOCAL_ALPHA = [2.0, 3.0, 1.2, 1.0, 0.8, 3.5, 3.0, 2.0]
 
 # ============================================================
 # Freeze settings for the R3D backbone
-# 永久冻结前面的 R3D 层，让训练更稳定。
-# Permanently freeze early R3D layers to keep training more stable.
+# 现在是从零训练纯 R3D，所以默认不冻结前层。
+# We now train a pure R3D model from scratch, so early layers are not frozen.
 # ============================================================
-FREEZE_R3D_STEM = True
-FREEZE_R3D_LAYER1 = True
-FREEZE_R3D_LAYER2 = True
+FREEZE_R3D_STEM = False
+FREEZE_R3D_LAYER1 = False
+FREEZE_R3D_LAYER2 = False
 
 NUM_WORKERS = 12
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -168,14 +169,14 @@ class HMDB51FrameDataset(Dataset):
         # 避免和离线固定提亮叠加得太重。
         # During training, only apply light online brightness / contrast jitter,
         # so it does not stack too strongly with the offline fixed enhancement.
-        self.color_jitter = (
-            T.ColorJitter(
+        self.color_jitter = None
+        if is_training and (
+            TRAIN_JITTER_BRIGHTNESS > 0.0 or TRAIN_JITTER_CONTRAST > 0.0
+        ):
+            self.color_jitter = T.ColorJitter(
                 brightness=TRAIN_JITTER_BRIGHTNESS,
                 contrast=TRAIN_JITTER_CONTRAST,
             )
-            if is_training
-            else None
-        )
 
     def __len__(self) -> int:
         return len(self.data)
@@ -516,10 +517,26 @@ def build_dataloader(
         use_test_enhancement=use_test_enhancement,
         multi_clip_eval=multi_clip_eval,
     )
+
+    sampler = None
+    actual_shuffle = shuffle
+    if shuffle and USE_WEIGHTED_SAMPLER:
+        label_counts = dataframe["label"].value_counts().to_dict()
+        sample_weights = dataframe["label"].map(
+            lambda label: 1.0 / max(label_counts.get(label, 1), 1)
+        ).astype(float).tolist()
+        sampler = WeightedRandomSampler(
+            weights=torch.DoubleTensor(sample_weights),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        actual_shuffle = False
+
     return DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
-        shuffle=shuffle,
+        shuffle=actual_shuffle,
+        sampler=sampler,
         num_workers=NUM_WORKERS,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=NUM_WORKERS > 0,
