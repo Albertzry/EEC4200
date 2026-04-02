@@ -44,9 +44,9 @@ CLIP_NUM_FRAMES = 32
 TEST_NUM_CLIPS = 3
 IMAGE_SIZE = 224
 BATCH_SIZE = 8
-EPOCHS = 50
-LEARNING_RATE = 5e-6
-FINAL_LEARNING_RATE = 1e-7
+EPOCHS = 15
+LEARNING_RATE = 2e-5
+FINAL_LEARNING_RATE = 1e-6
 WEIGHT_DECAY = 5e-3
 NUM_FOLDS = 5
 
@@ -62,8 +62,8 @@ DROPOUT = 0.5
 # 统一离线提亮之后，训练阶段只保留较轻的随机扰动。
 # After unified offline enhancement, keep only light random perturbation in training.
 # ============================================================
-TRAIN_JITTER_BRIGHTNESS = 0.15
-TRAIN_JITTER_CONTRAST = 0.05
+TRAIN_JITTER_BRIGHTNESS = 0.10
+TRAIN_JITTER_CONTRAST = 0.03
 
 # ============================================================
 # Focal loss settings
@@ -73,7 +73,7 @@ TRAIN_JITTER_CONTRAST = 0.05
 # Class order:
 # [Drink, Jump, Pick, Pour, Push, Run, Walk, Wave]
 # ============================================================
-USE_FOCAL_LOSS = True
+USE_FOCAL_LOSS = False
 FOCAL_GAMMA = 2.0
 FOCAL_ALPHA = [2.0, 3.0, 1.2, 1.0, 0.8, 3.5, 3.0, 2.0]
 

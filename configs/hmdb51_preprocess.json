@@ -11,7 +11,7 @@
     "target_height": 224,
     "target_fps": 16.0,
     "num_frames": 48,
-    "num_augmentations": 3,
+    "num_augmentations": 1,
     "augmentation_profile": "medium",
     "random_seed": 42,
     "jpeg_quality": 95,
